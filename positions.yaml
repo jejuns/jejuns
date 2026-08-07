@@ -1,0 +1,6 @@
+positions:
+  - ticker: "005930"
+    avg_price: 72000
+    buy_date: "2026-01-15"
+    stop_loss_pct: -10
+    trailing_pct: -15

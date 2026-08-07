@@ -1,0 +1,72 @@
+name: 종목 분석
+
+on:
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "티커 (쉼표 구분, 비우면 positions.yaml + watchlist.yaml 전체)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: 분석 실행
+        id: analyze
+        shell: bash
+        run: |
+          IFS=',' read -ra RAW <<< "${{ github.event.inputs.tickers }}"
+          TICKERS=()
+          for t in "${RAW[@]}"; do
+            [[ -n "$t" ]] && TICKERS+=("$t")
+          done
+          python -m stockta analyze "${TICKERS[@]}"
+
+      - name: 매수/청산 신호 시 이슈 코멘트
+        if: steps.analyze.outputs.has_signal == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('report.md', 'utf8');
+            const title = "매매 신호 로그";
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: "trading-signal-log",
+            });
+
+            let issueNumber = issues.find(i => i.title === title)?.number;
+            if (!issueNumber) {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body: "매수/청산 신호가 발생할 때마다 이 이슈에 코멘트로 기록됩니다.",
+                labels: ["trading-signal-log"],
+              });
+              issueNumber = created.data.number;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: `### ${new Date().toISOString()}\n\n\`\`\`\n${body}\n\`\`\``,
+            });
