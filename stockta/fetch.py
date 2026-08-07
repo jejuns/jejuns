@@ -27,7 +27,12 @@ def _flatten_yf_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _yf_download(symbol: str, period: str = f"{config.LOOKBACK_YEARS}y") -> pd.DataFrame:
     df = yf.download(symbol, period=period, auto_adjust=False, progress=False)
-    return _flatten_yf_columns(df)
+    df = _flatten_yf_columns(df)
+    if not df.empty:
+        # 당일 장중 세션 등 미확정 마지막 행이 NaN으로 들어오면 .iloc[-1] 기반 계산이
+        # 조용히 깨지므로(SMA/게이트 전부 NaN) 제거한다.
+        df = df.dropna(subset=["Close"])
+    return df
 
 
 def _pykrx_ohlcv(ticker6: str) -> pd.DataFrame:
@@ -43,6 +48,13 @@ def _pykrx_ohlcv(ticker6: str) -> pd.DataFrame:
 
 @lru_cache(maxsize=256)
 def _resolve_kr_suffix(ticker6: str) -> str | None:
+    """OHLCV/실적일 조회용으로 '작동하는' 접미사를 찾는다 (시장 판별용 아님).
+
+    yfinance는 .KS/.KQ를 검증하지 않고 어느 쪽을 붙이든 같은 실데이터를 준다
+    (실측 확인됨). 그래서 이 함수는 가격 데이터를 얻는 데는 문제없이 쓸 수
+    있지만, 코스피/코스닥 구분에는 못 쓴다 — 그건 kr_market_suffix()가
+    KRX 공식 목록으로 따로 판별한다.
+    """
     for suffix in (".KS", ".KQ"):
         df = _yf_download(ticker6 + suffix, period="5d")
         if not df.empty:
@@ -78,9 +90,36 @@ def resample_weekly(df: pd.DataFrame) -> pd.DataFrame:
     return df.resample("W-FRI").agg(agg).dropna()
 
 
-def kr_market_suffix(ticker: str) -> str:
-    """수급 조회 등에서 코스피/코스닥 벤치마크 선택용. 실측 실패 시 KS로 가정."""
-    return _resolve_kr_suffix(ticker) or ".KS"
+@lru_cache(maxsize=1)
+def _kosdaq_ticker_set() -> frozenset | None:
+    """KRX 공식 코스닥 종목 목록. 조회 실패 시 None(=시장 구분 불가).
+
+    yfinance의 .KS/.KQ 접미사는 시장을 검증하지 않는다 — 실측 확인 결과
+    코스피 종목(005930, 000660)에 .KQ를 붙여도, 코스닥 종목(247540)에 .KS를
+    붙여도 똑같은 실데이터가 그대로 반환된다. 따라서 접미사 프로빙으로는
+    코스피/코스닥을 구분할 수 없고, KRX 공식 목록으로만 판별 가능하다.
+    """
+    try:
+        from pykrx import stock
+
+        date = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+        tickers = stock.get_market_ticker_list(date, market="KOSDAQ")
+        return frozenset(tickers) if tickers else None
+    except Exception:
+        return None
+
+
+def kr_market_suffix(ticker: str) -> tuple[str, bool]:
+    """반환: (접미사, 시장 구분 불확실 여부).
+
+    KRX 공식 코스닥 목록 조회가 실패하면 코스피로 가정하되, 실제로는
+    코스닥일 수 있으므로 불확실함을 호출부에 알린다(조용히 틀린 벤치마크를
+    쓰는 것보다 낫다).
+    """
+    kosdaq = _kosdaq_ticker_set()
+    if kosdaq is None:
+        return ".KS", True
+    return (".KQ", False) if ticker in kosdaq else (".KS", False)
 
 
 @lru_cache(maxsize=8)
@@ -90,12 +129,30 @@ def fetch_benchmark(symbol: str) -> pd.DataFrame:
     return df[["Open", "High", "Low", "Close", "Volume"]]
 
 
+def resolve_benchmark_symbol(ticker: str) -> tuple[str, str | None]:
+    """반환: (실제 사용할 벤치마크 심볼, 경고 메시지 또는 None).
+
+    조용히 틀린 지수를 쓰는 상황이 두 가지 있고 각각 다르게 경고한다:
+    1. KRX 코스닥 목록 조회 실패로 코스피/코스닥 구분 자체가 불확실
+    2. 코스닥으로 확인됐지만 ^KQ11 조회가 실패해 ^KS11로 대체
+    """
+    if not is_kr_ticker(ticker):
+        return config.BENCH_US, None
+
+    suffix, uncertain = kr_market_suffix(ticker)
+    if uncertain:
+        return config.BENCH_KR, "코스피/코스닥 구분 조회 실패 — 코스피 지수로 가정(틀렸을 수 있음)"
+    if suffix != ".KQ":
+        return config.BENCH_KR, None
+
+    if not fetch_benchmark(config.BENCH_KQ).empty:
+        return config.BENCH_KQ, None
+    return config.BENCH_KR, "^KQ11 조회 실패로 ^KS11(코스피)로 대체"
+
+
 def benchmark_for_ticker(ticker: str) -> pd.DataFrame:
-    if is_kr_ticker(ticker):
-        suffix = kr_market_suffix(ticker)
-        symbol = config.BENCH_KQ if suffix == ".KQ" else config.BENCH_KR
-        return fetch_benchmark(symbol)
-    return fetch_benchmark(config.BENCH_US)
+    symbol, _ = resolve_benchmark_symbol(ticker)
+    return fetch_benchmark(symbol)
 
 
 def fetch_kr_supply(ticker: str, days: int = 20) -> dict | None:

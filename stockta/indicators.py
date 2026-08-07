@@ -99,13 +99,22 @@ def mom_12_1(s: pd.Series) -> pd.Series:
     return ret_12m - ret_1m
 
 
+def _align_to_stock(s: pd.Series, bench: pd.Series) -> pd.Series:
+    """휴장일 불일치로 벤치마크에 s의 날짜가 비어 있으면 직전 값으로 채운다.
+
+    reindex만 하면 그 날짜의 벤치마크가 NaN이 되어 RS Line·상대수익률 tail이
+    조용히 NaN으로 깨질 수 있다.
+    """
+    return bench.reindex(s.index).ffill()
+
+
 def rs_line(s: pd.Series, bench: pd.Series) -> pd.Series:
-    aligned_s, aligned_bench = s.align(bench, join="left")
-    return aligned_s / aligned_bench
+    aligned_bench = _align_to_stock(s, bench)
+    return s / aligned_bench
 
 
 def rel_return(s: pd.Series, bench: pd.Series, n: int) -> pd.Series:
-    aligned_s, aligned_bench = s.align(bench, join="left")
-    stock_ret = aligned_s / aligned_s.shift(n) - 1
+    aligned_bench = _align_to_stock(s, bench)
+    stock_ret = s / s.shift(n) - 1
     bench_ret = aligned_bench / aligned_bench.shift(n) - 1
     return stock_ret - bench_ret

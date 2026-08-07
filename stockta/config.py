@@ -18,7 +18,10 @@ WEIGHT_POSITION = 20
 WEIGHT_MOMENTUM = 15
 WEIGHT_SUPPLY = 20
 
-# --- 판정 임계 (0~100 정규화 기준) ---
+# --- 판정 임계 ---
+# 원점수(카테고리 배점 합산, 이론상 -77~+100)를 0으로 하한 클램프·100으로
+# 상한 클램프해서 그대로 쓴다. 선형 재조정을 하지 않으므로 원점수 70 이상이
+# 그대로 "적극 매수"를 뜻한다. (entry.py의 _normalize_score 참조)
 SCORE_STRONG_BUY = 70
 SCORE_PARTIAL_BUY = 55
 SCORE_WATCH = 40

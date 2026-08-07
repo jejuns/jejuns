@@ -63,6 +63,34 @@ def test_loss_with_sma200_still_rising_triggers_partial_exit():
     assert result.grade == "부분 청산 50%"
 
 
+def test_currency_mismatch_avg_price_triggers_sanity_warning():
+    """CHECK 5 회귀 테스트 — 미국 종목 평단을 원화로 잘못 입력한 경우
+    (예: AAPL 실제 가격은 ~$300대인데 250000을 입력) 조용히 넘어가지 않고
+    경고를 내야 한다."""
+    stock = synth.uptrend(n=300, seed=1005, mu=0.0005, sigma=0.006)  # 종가는 대략 100대
+    weekly, bench = _setup(stock)
+
+    result = exit_mod.evaluate_exit(
+        "T5", stock, weekly, bench, avg_price=250000, buy_date=str(stock.index[0].date()),
+        stop_loss_pct=-10,
+    )
+
+    assert any("통화" in w for w in result.warnings)
+
+
+def test_normal_avg_price_has_no_sanity_warning():
+    stock = synth.uptrend(n=300, seed=1006, mu=0.0005, sigma=0.006)
+    weekly, bench = _setup(stock)
+    avg_price = stock["Close"].iloc[-1]  # 현재가와 동일 — 정상 범위
+
+    result = exit_mod.evaluate_exit(
+        "T6", stock, weekly, bench, avg_price=avg_price, buy_date=str(stock.index[0].date()),
+        stop_loss_pct=-10,
+    )
+
+    assert not any("통화" in w for w in result.warnings)
+
+
 def test_trailing_stop_triggers_independent_of_gate():
     stock = synth.uptrend(n=300, seed=1004, mu=0.0, sigma=0.003)
     weekly, bench = _setup(stock)

@@ -117,15 +117,13 @@ def cmd_analyze(args) -> int:
 
     for ticker in tickers:
         try:
-            bench_df = fetch.benchmark_for_ticker(ticker)
-            if fetch.is_kr_ticker(ticker):
-                symbol = config.BENCH_KQ if fetch.kr_market_suffix(ticker) == ".KQ" else config.BENCH_KR
-            else:
-                symbol = config.BENCH_US
-            if symbol not in market_line_printed:
+            symbol, warning = fetch.resolve_benchmark_symbol(ticker)
+            line_key = (symbol, ticker) if warning else symbol
+            if line_key not in market_line_printed:
+                bench_df = fetch.fetch_benchmark(symbol)
                 g1 = regime.evaluate_market_gate(bench_df)
-                output_sections.append(report.render_market_regime_line(symbol, g1))
-                market_line_printed.add(symbol)
+                output_sections.append(report.render_market_regime_line(symbol, g1, warning))
+                market_line_printed.add(line_key)
         except Exception:
             pass
 

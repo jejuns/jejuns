@@ -19,6 +19,23 @@ class ExitResult:
     warnings: list[str]
 
 
+def _price_sanity_warning(avg_price: float, stock_df: pd.DataFrame) -> str | None:
+    """평단이 최근 1년 가격대와 자릿수 단위로 어긋나면 경고한다.
+
+    가장 흔한 실패 모드: 미국 종목 평단을 원화로 잘못 입력. 완벽한 통화 검증
+    대신 "52주 저가의 0.3배 ~ 고가의 3배" 범위를 벗어나는지만 본다 — 이러면
+    통화 실수뿐 아니라 자릿수 오타도 함께 걸러진다.
+    """
+    window = stock_df["Close"].tail(252)
+    lo, hi = window.min(), window.max()
+    if avg_price < lo * 0.3 or avg_price > hi * 3:
+        return (
+            f"🚨 평단({avg_price:,.2f})이 최근 1년 가격 범위({lo:,.2f}~{hi:,.2f})와 크게 어긋납니다 — "
+            "통화 단위 실수(원화/달러 혼동) 또는 자릿수 오타 가능성. positions.yaml을 확인하세요."
+        )
+    return None
+
+
 def _trend_warnings(stock_df: pd.DataFrame, weekly_df: pd.DataFrame, bench_df: pd.DataFrame) -> list[str]:
     warnings = []
     close = stock_df["Close"]
@@ -96,7 +113,11 @@ def evaluate_exit(
                 f"(임계 {trailing_pct:+.1f}%)"
             )
 
-    warnings = _trend_warnings(stock_df, weekly_df, bench_df)
+    warnings = []
+    sanity_warning = _price_sanity_warning(avg_price, stock_df)
+    if sanity_warning:
+        warnings.append(sanity_warning)
+    warnings.extend(_trend_warnings(stock_df, weekly_df, bench_df))
 
     return ExitResult(
         ticker=ticker,

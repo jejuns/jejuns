@@ -24,9 +24,12 @@ def _mark(contribution: float) -> str:
     return "⬜"
 
 
-def render_market_regime_line(symbol: str, g1) -> str:
+def render_market_regime_line(symbol: str, g1, warning: str | None = None) -> str:
     status = "✅ 강세국면 (G1 통과)" if g1.passed else "🔻 약세국면 (G1 미통과)"
-    return f"━━ 시장 국면 ({symbol}): {g1.detail} → {status}"
+    line = f"━━ 시장 국면 ({symbol}): {g1.detail} → {status}"
+    if warning:
+        line += f"\n⚠️ 벤치마크: {warning}"
+    return line
 
 
 def _render_gates_line(gate_report: GateReport) -> str:

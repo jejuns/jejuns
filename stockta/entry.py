@@ -156,10 +156,15 @@ def _category_e(stock_df: pd.DataFrame, is_kr: bool, kr_supply: dict | None) -> 
     vol20 = vol.rolling(20).mean().iloc[-1]
     vol_confirmed = vol5 > vol20
 
-    if is_kr:
+    # 재분배 조건은 "국가"가 아니라 "수급 데이터를 실제로 쓸 수 있는가"다.
+    # pykrx가 실패하면 한국 종목도 미국과 동일하게 재분배해야 카테고리 만점이
+    # 20으로 유지된다 — 그렇지 않으면 데이터 조회 실패가 종목 자체의 감점으로
+    # 둔갑해 한국 종목이 구조적으로 불리해진다.
+    supply_available = is_kr and kr_supply is not None
+    if supply_available:
         obv_max, vol_max = 8, 4
     else:
-        scale = (8 + 4 + 8) / (8 + 4)  # 한국 전용 8점을 OBV·거래량에 비례 재분배
+        scale = (8 + 4 + 8) / (8 + 4)  # 미사용 8점을 OBV·거래량에 비례 재분배
         obv_max, vol_max = 8 * scale, 4 * scale
 
     contrib = obv_max if obv_slope > 0 else -5
@@ -169,14 +174,15 @@ def _category_e(stock_df: pd.DataFrame, is_kr: bool, kr_supply: dict | None) -> 
     rules.append(_rule("거래량 확인", "E", vol_max, contrib, f"5일 {vol5:,.0f} vs 20일 {vol20:,.0f}"))
 
     if is_kr:
-        if kr_supply is None:
-            rules.append(_rule("[한국] 외국인 순매수", "E", 4, 0, "N/A", "수급 데이터 조회 실패"))
-            rules.append(_rule("[한국] 기관 순매수", "E", 4, 0, "N/A", "수급 데이터 조회 실패"))
-        else:
+        if supply_available:
             f_net = kr_supply["foreign_net"]
             i_net = kr_supply["institution_net"]
             rules.append(_rule("[한국] 외국인 순매수", "E", 4, 4 if f_net > 0 else 0, f"{f_net:,.0f}"))
             rules.append(_rule("[한국] 기관 순매수", "E", 4, 4 if i_net > 0 else 0, f"{i_net:,.0f}"))
+        else:
+            # weight=0: 표시는 하되 분모(카테고리 만점)에는 포함하지 않는다.
+            rules.append(_rule("[한국] 외국인 순매수", "E", 0, 0, "N/A", "수급 데이터 조회 실패 — OBV/거래량에 배점 재분배"))
+            rules.append(_rule("[한국] 기관 순매수", "E", 0, 0, "N/A", "수급 데이터 조회 실패 — OBV/거래량에 배점 재분배"))
 
     price_up = stock_df["Close"].iloc[-1] > stock_df["Close"].iloc[-20]
     obv_down = obv.iloc[-1] < obv.iloc[-20]
@@ -184,6 +190,16 @@ def _category_e(stock_df: pd.DataFrame, is_kr: bool, kr_supply: dict | None) -> 
     contrib = -8 if diverging else 0
     rules.append(_rule("약세 다이버전스", "E", 0, contrib, "있음" if diverging else "없음"))
     return rules
+
+
+def _normalize_score(raw_score: float, dampen: float) -> float:
+    """원점수(이론상 -77~+100)를 0~100으로 클램프한다.
+
+    선형 재조정(예: (raw+77)/177*100)은 쓰지 않는다 — 그러면 원점수 +40(꽤
+    좋은 종목)이 66점으로 내려앉아 임계값 70/55/40의 의미가 깨진다. 음수는
+    어차피 "진입 부적합" 구간이라 세분화할 가치가 없으므로 0으로 클램프한다.
+    """
+    return max(0.0, min(raw_score * dampen, 100.0))
 
 
 def _verdict(score: float) -> tuple[str, str]:
@@ -218,7 +234,7 @@ def score_entry(
         category_totals[cat] = sum(r.contribution for r in all_rules if r.category == cat)
 
     raw_score = sum(category_totals.values())
-    final_score = min(raw_score * gate_report.score_dampen, 100.0)
+    final_score = _normalize_score(raw_score, gate_report.score_dampen)
 
     if gate_report.blocked:
         verdict, action = gate_report.block_reason, "미진입"

@@ -130,6 +130,20 @@ def test_pct_from_52w_high_bounds():
     assert -1.0 <= pct <= 1e-9
 
 
+def test_rs_line_tolerates_bench_holiday_gap():
+    """CHECK 4 회귀 테스트 — 벤치마크에 종목 거래일 하루가 비어 있어도(휴장일 불일치)
+    RS Line 최신값이 NaN으로 깨지면 안 된다(ffill로 방어)."""
+    idx = pd.bdate_range("2025-01-01", periods=100)
+    stock = pd.Series(np.linspace(100, 150, 100), index=idx)
+    bench_idx = idx.delete(50)  # 종목엔 있는 날짜가 벤치마크엔 없음
+    bench = pd.Series(np.linspace(1000, 1100, 99), index=bench_idx)
+
+    rs = indicators.rs_line(stock, bench)
+
+    assert not rs.isna().any()
+    assert not np.isnan(rs.iloc[-1])
+
+
 def test_rs_line_and_rel_return_reward_outperformance():
     strong = synth.uptrend(n=400, seed=61, mu=0.003, sigma=0.004)
     weak = synth.uptrend(n=400, seed=62, mu=0.0002, sigma=0.004)
