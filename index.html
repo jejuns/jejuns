@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>밀담</title>
+<meta name="theme-color" content="#0f1420" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<main id="app">
+
+  <section id="view-onboarding" hidden>
+    <div class="screen">
+      <h1 class="brand">밀담</h1>
+      <p class="hint">자체 서버 없이 공개 릴레이로 암호문만 주고받는 종단간 암호화 메신저입니다. 대화 내용은 두 사람 외에는 누구도 읽을 수 없습니다.</p>
+      <p class="hint">메시지는 상대가 꺼져 있어도 전달됩니다. 알림은 설정에서 도우미를 등록하면 받을 수 있습니다.</p>
+      <label class="field">
+        <span>이름</span>
+        <input id="ob-name" type="text" maxlength="20" autocomplete="off" placeholder="상대에게 보일 이름" />
+      </label>
+      <button id="ob-create" class="btn btn-primary">시작하기</button>
+    </div>
+  </section>
+
+  <section id="view-contacts" hidden>
+    <header class="topbar">
+      <h1 class="topbar-title">밀담</h1>
+      <span id="contacts-badge" class="badge">연결 중…</span>
+      <button id="nav-settings" class="icon-btn" title="설정" aria-label="설정">⚙</button>
+      <button id="nav-add" class="icon-btn" title="친구 추가" aria-label="친구 추가">＋</button>
+    </header>
+    <div class="screen screen-flush">
+      <p id="contacts-empty" class="hint" hidden>아직 친구가 없습니다. ＋ 버튼으로 초대코드를 교환해 보세요.</p>
+      <ul id="contacts-list" class="contact-list"></ul>
+    </div>
+  </section>
+
+  <section id="view-add" hidden>
+    <header class="topbar">
+      <button id="add-back" class="icon-btn" title="뒤로" aria-label="뒤로">←</button>
+      <h1 class="topbar-title">친구 추가</h1>
+    </header>
+    <div class="screen">
+      <label class="field">
+        <span>내 초대코드</span>
+        <textarea id="add-mycode" class="code-box" rows="4" readonly></textarea>
+      </label>
+      <button id="add-copy" class="btn">내 코드 복사</button>
+      <hr class="sep" />
+      <label class="field">
+        <span>상대 초대코드</span>
+        <textarea id="add-peercode" class="code-box" rows="4" placeholder="상대에게 받은 코드를 붙여넣으세요"></textarea>
+      </label>
+      <button id="add-submit" class="btn btn-primary">친구 추가</button>
+      <p class="hint">초대코드는 직접 만나서 또는 이미 신뢰하는 다른 채널로 교환하세요. 서로 상대의 코드를 등록해야 대화가 시작됩니다.</p>
+    </div>
+  </section>
+
+  <section id="view-chat" hidden>
+    <header class="topbar">
+      <button id="chat-back" class="icon-btn" title="뒤로" aria-label="뒤로">←</button>
+      <div class="topbar-title-group">
+        <h1 id="chat-title" class="topbar-title"></h1>
+        <span id="chat-badge" class="badge">연결 중…</span>
+      </div>
+      <button id="chat-safety" class="icon-btn" title="안전코드" aria-label="안전코드">🔑</button>
+    </header>
+    <div id="chat-messages" class="messages"></div>
+    <form id="chat-form" class="composer">
+      <textarea id="chat-input" rows="1" maxlength="2000" placeholder="메시지 입력" autocomplete="off"></textarea>
+      <button id="chat-send" type="submit" class="btn btn-primary" disabled>전송</button>
+    </form>
+  </section>
+
+  <section id="view-safety" hidden>
+    <header class="topbar">
+      <button id="safety-back" class="icon-btn" title="뒤로" aria-label="뒤로">←</button>
+      <h1 class="topbar-title">안전코드</h1>
+    </header>
+    <div class="screen">
+      <p id="safety-name" class="hint"></p>
+      <p id="safety-code" class="safety-code"></p>
+      <p class="hint">두 사람의 화면에 같은 코드가 표시되면 대화 상대가 바꿔치기되지 않았다는 뜻입니다. 직접 만나거나 영상통화로 확인하세요.</p>
+    </div>
+  </section>
+
+  <section id="view-settings" hidden>
+    <header class="topbar">
+      <button id="set-back" class="icon-btn" title="뒤로" aria-label="뒤로">←</button>
+      <h1 class="topbar-title">설정</h1>
+    </header>
+    <div class="screen">
+      <p class="hint">알림은 집의 도우미 기기가 켜져 있을 때 옵니다. 도우미는 암호문만 볼 수 있어 알림에 내용이 표시되지 않습니다.</p>
+      <label class="field">
+        <span>도우미 코드</span>
+        <textarea id="set-helpercode" class="code-box" rows="3" placeholder="도우미 기기에서 출력된 코드를 붙여넣으세요"></textarea>
+      </label>
+      <button id="set-helper-save" class="btn">도우미 등록</button>
+      <hr class="sep" />
+      <button id="set-notify" class="btn btn-primary" disabled>알림 켜기</button>
+      <p id="set-notify-hint" class="hint" hidden>먼저 도우미 코드를 등록하세요</p>
+    </div>
+  </section>
+
+</main>
+
+<div id="toast" class="toast" hidden></div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

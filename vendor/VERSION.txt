@@ -1,0 +1,35 @@
+nostr-tools 2.25.0
+
+Included exports: generateSecretKey, getPublicKey, finalizeEvent, verifyEvent
+(from nostr-tools/pure), SimplePool (from nostr-tools/pool), wrapEvent/unwrapEvent
+(from nostr-tools/nip17), getConversationKey (from nostr-tools/nip44), GiftWrap
+(from nostr-tools/kinds), schnorr (from @noble/curves/secp256k1.js, nostr-tools'
+own signing dependency — used for the raw prekey signature in PLAN.md §6.2/§6.3,
+which is not itself a Nostr event).
+
+Build deviation from PLAN.md §4.2 step 1: the jsDelivr `+esm` endpoint
+(cdn.jsdelivr.net) and every alternative CDN tried (esm.sh, unpkg.com,
+cdn.skypack.dev) were unreachable from this sandboxed build environment
+(network policy blocks them; only registry.npmjs.org and a few other package
+registries are allowed). Produced the same kind of artifact — a single
+self-contained browser ESM bundle, no runtime CDN dependency — by installing
+nostr-tools@2.25.0 from the npm registry and bundling the six exports above
+with esbuild (--bundle --format=esm --platform=browser --target=es2020
+--minify) instead. Verified with a smoke test exercising every exported
+function (event sign/verify, NIP-17/59 wrap+unwrap round trip, NIP-44
+conversation-key symmetry, schnorr sign/verify, SimplePool construction)
+before committing. No protocol or security spec (PLAN.md §6/§7) was changed;
+only the packaging method for step 1 of §4.2 differs. Flagged per PLAN.md
+§14 rule B.
+
+Rebuild recipe (if a future update is needed):
+  npm install nostr-tools@2.25.0 esbuild
+  echo '
+  export { generateSecretKey, getPublicKey, finalizeEvent, verifyEvent } from "nostr-tools/pure";
+  export { SimplePool } from "nostr-tools/pool";
+  export { wrapEvent, unwrapEvent } from "nostr-tools/nip17";
+  export { getConversationKey } from "nostr-tools/nip44";
+  export { GiftWrap } from "nostr-tools/kinds";
+  export { schnorr } from "@noble/curves/secp256k1.js";
+  ' > entry.js
+  npx esbuild entry.js --bundle --format=esm --platform=browser --target=es2020 --minify --outfile=nostr-tools.js
