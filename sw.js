@@ -9,6 +9,8 @@ const PRECACHE = [
   "js/main.js",
   "js/util.js",
   "js/pfs.js",
+  "js/crypto.js",
+  "js/store.js",
   "vendor/nostr-tools.js",
   "icons/icon.svg",
   "manifest.webmanifest",
