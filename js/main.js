@@ -4,15 +4,16 @@ import {
   getIdentity, saveIdentity, getAllContacts, addContact, contactExists, getContact,
   getSession, saveSession, addMessage, hasMessage, updateMessageStatus,
   getMessagesByContact, getLastSync, setLastSync, hasSeenWrap, markSeenWrap,
-  pruneSeenWraps,
+  pruneSeenWraps, getHelper, saveHelper,
 } from "./store.js";
 import {
   generateIdentity, encodeInviteCode, parseInviteCode, verifyInviteSignature,
   buildOutgoingWrap, unwrapIncoming, decryptPayload, computeSafetyCode, formatSafetyCode,
+  parseHelperCode, buildHelperRegistrationWrap,
 } from "./crypto.js";
 import { createManager } from "./pfs.js";
 import * as net from "./net.js";
-import { te } from "./util.js";
+import { te, b64uToBuf } from "./util.js";
 
 // PLAN.md §11 오류 문구 표 (그대로).
 const ERRORS = {
@@ -21,6 +22,7 @@ const ERRORS = {
   E05: "이미 추가된 친구입니다",
   E07: "전송에 실패했습니다. 네트워크 확인 후 메시지를 탭해 다시 보내세요.",
   E08: "초대코드 검증에 실패했습니다. 상대에게 코드를 다시 받아 확인하세요.",
+  E09: "도우미 코드 형식이 올바르지 않습니다",
 };
 
 const VIEWS = [
@@ -325,6 +327,65 @@ async function handleAddSubmit() {
   showView("view-contacts");
 }
 
+// ---------------------------------------------------------------- 설정(§9.6, §16)
+
+async function openSettingsView() {
+  const helper = await getHelper();
+  const notifyBtn = document.getElementById("set-notify");
+  const hint = document.getElementById("set-notify-hint");
+  notifyBtn.disabled = !helper;
+  hint.hidden = !!helper;
+  showView("view-settings");
+}
+
+async function handleHelperSave() {
+  const input = document.getElementById("set-helpercode");
+  const parsed = parseHelperCode(input.value.trim());
+  if (!parsed.ok) {
+    toast(ERRORS[parsed.error]);
+    return;
+  }
+  await saveHelper({ pk: parsed.pk, vapid: parsed.vapid });
+  toast("도우미가 등록되었습니다");
+  document.getElementById("set-notify").disabled = false;
+  document.getElementById("set-notify-hint").hidden = true;
+}
+
+async function handleNotifyEnable() {
+  const helper = await getHelper();
+  if (!helper) {
+    toast("먼저 도우미 코드를 등록하세요");
+    return;
+  }
+  if (!("Notification" in window) || !("serviceWorker" in navigator) || !("PushManager" in window)) {
+    console.warn("mildam: this browser does not support Web Push");
+    return;
+  }
+
+  const permission = await Notification.requestPermission();
+  if (permission !== "granted") {
+    toast("알림 권한이 거부되었습니다. 브라우저 설정에서 허용해 주세요.");
+    return;
+  }
+
+  const registration = await navigator.serviceWorker.ready;
+  let subscription = await registration.pushManager.getSubscription();
+  if (!subscription) {
+    subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: b64uToBuf(helper.vapid),
+    });
+  }
+
+  const wrapped = buildHelperRegistrationWrap(identity, helper.pk, subscription.toJSON());
+  const result = await net.publishWrap(wrapped);
+  if (result.ok) {
+    toast("알림이 켜졌습니다");
+  } else {
+    toast(ERRORS.E07);
+  }
+}
+
 // ---------------------------------------------------------------- 연결 상태 배지
 
 function badgeText(state) {
@@ -487,6 +548,19 @@ function wireEvents() {
   });
   document.getElementById("safety-back").addEventListener("click", () => {
     showView("view-chat");
+  });
+
+  document.getElementById("nav-settings").addEventListener("click", () => {
+    openSettingsView();
+  });
+  document.getElementById("set-back").addEventListener("click", () => {
+    showView("view-contacts");
+  });
+  document.getElementById("set-helper-save").addEventListener("click", () => {
+    handleHelperSave();
+  });
+  document.getElementById("set-notify").addEventListener("click", () => {
+    handleNotifyEnable();
   });
 }
 

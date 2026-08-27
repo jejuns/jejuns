@@ -53,3 +53,27 @@ self.addEventListener("fetch", (event) => {
     })()
   );
 });
+
+// PLAN.md §10.2: 페이로드는 파싱하지 않는다 — 도우미가 애초에 암호문 외에는
+// 아무것도 보내지 않으므로(내용 없는 빈 알림), 여기서 읽을 것이 없다.
+self.addEventListener("push", (event) => {
+  event.waitUntil(
+    self.registration.showNotification("밀담", {
+      body: "새 메시지가 도착했습니다",
+      icon: "icons/icon.svg",
+    })
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    (async () => {
+      const clientsList = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const client of clientsList) {
+        if ("focus" in client) return client.focus();
+      }
+      return self.clients.openWindow(".");
+    })()
+  );
+});

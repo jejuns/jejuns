@@ -10,6 +10,7 @@ import {
 import { bufToB64u, b64uToBuf, bufToHex, hexToBuf, te, td, sha256Hex } from "./util.js";
 
 const INVITE_PREFIX = "MD3.";
+const HELPER_PREFIX = "MDH1.";
 const HEX64_RE = /^[0-9a-f]{64}$/;
 
 // ---------------------------------------------------------------- §6.2 신원·프리키
@@ -94,6 +95,35 @@ export async function verifyInviteSignature(parsed) {
   } catch {
     return false;
   }
+}
+
+// ---------------------------------------------------------------- §16.2 도우미 코드
+
+// 성공: {ok:true, pk, vapid}  형식 오류: {ok:false, error:"E09"}
+export function parseHelperCode(code) {
+  if (typeof code !== "string" || !code.startsWith(HELPER_PREFIX)) {
+    return { ok: false, error: "E09" };
+  }
+  let obj;
+  try {
+    const json = td.decode(b64uToBuf(code.slice(HELPER_PREFIX.length)));
+    obj = JSON.parse(json);
+  } catch {
+    return { ok: false, error: "E09" };
+  }
+  if (!obj || obj.v !== 1) return { ok: false, error: "E09" };
+  if (typeof obj.pk !== "string" || !HEX64_RE.test(obj.pk)) return { ok: false, error: "E09" };
+  if (typeof obj.vapid !== "string" || obj.vapid.length === 0) return { ok: false, error: "E09" };
+  return { ok: true, pk: obj.pk, vapid: obj.vapid };
+}
+
+// §16.3: 도우미 등록 DM. pfs 봉투 없이 NIP-17/44만으로 보낸다(도우미가
+// 직접 읽어야 하므로 — 대화 상대가 아니라 라우팅 인프라다).
+export function buildHelperRegistrationWrap(identity, helperPk, pushSubscriptionJson) {
+  const content = JSON.stringify({
+    v: 3, kind: "pushsub", sub: pushSubscriptionJson, ts: Date.now(),
+  });
+  return wrapEvent(identity.sk, { publicKey: helperPk }, content);
 }
 
 // ---------------------------------------------------------------- §6.7 안전코드
