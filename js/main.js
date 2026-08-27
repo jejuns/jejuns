@@ -1,11 +1,17 @@
 // main.js — 부팅, 화면 전환, 이벤트 바인딩 (오케스트레이션만, PLAN.md §5).
 
 import {
-  getIdentity, saveIdentity, getAllContacts, addContact, contactExists,
+  getIdentity, saveIdentity, getAllContacts, addContact, contactExists, getContact,
+  getSession, saveSession, addMessage, hasMessage, updateMessageStatus,
+  getLastSync, setLastSync, hasSeenWrap, markSeenWrap,
 } from "./store.js";
 import {
   generateIdentity, encodeInviteCode, parseInviteCode, verifyInviteSignature,
+  buildOutgoingWrap, unwrapIncoming, decryptPayload,
 } from "./crypto.js";
+import { createManager } from "./pfs.js";
+import * as net from "./net.js";
+import { te } from "./util.js";
 
 // PLAN.md §11 오류 문구 표 (그대로).
 const ERRORS = {
@@ -121,6 +127,7 @@ async function handleCreateIdentity() {
 
   await renderContactsList();
   showView("view-contacts");
+  await startMessaging();
 }
 
 // ---------------------------------------------------------------- 친구 추가
@@ -174,6 +181,120 @@ async function handleAddSubmit() {
   showView("view-contacts");
 }
 
+// ---------------------------------------------------------------- 연결 상태 배지
+
+function badgeText(state) {
+  if (state === "online") return "🔒 암호화 연결됨";
+  if (state === "offline") return "오프라인 — 네트워크를 확인하세요";
+  return "연결 중…";
+}
+
+function updateConnectionBadges(state) {
+  const text = badgeText(state);
+  const cls = state === "online" ? "online" : state === "offline" ? "offline" : "";
+  for (const id of ["contacts-badge", "chat-badge"]) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.textContent = text;
+    el.className = "badge" + (cls ? " " + cls : "");
+  }
+}
+
+// ---------------------------------------------------------------- 발신·수신 파이프라인 (§6.6, §7)
+
+// 새 메시지를 상대에게 암호화해 발행한다. 성공 여부와 무관하게 로컬에는
+// 즉시 저장한다(상태만 sent/failed로 갈린다 — PLAN.md §8.1).
+export async function sendText(contact, body) {
+  const mgr = (await getSession(contact.pk)) || createManager(identity.pk, contact.pk);
+  const payload = { v: 3, kind: "text", id: crypto.randomUUID(), body, ts: Date.now() };
+  const wrapped = await buildOutgoingWrap(identity, contact, mgr, te.encode(JSON.stringify(payload)));
+  await saveSession(contact.pk, mgr);
+  const result = await net.publishWrap(wrapped);
+  await addMessage({
+    id: payload.id, pk: contact.pk, dir: "out", body, ts: payload.ts,
+    status: result.ok ? "sent" : "failed",
+  });
+  return { id: payload.id, ok: result.ok };
+}
+
+// PLAN.md §7.3 수신 게이트를 순서대로 통과시킨다: ① 중복 wrap ② unwrap 실패
+// ③ 미등록 발신자 ④ §6.6 파이프라인. ①~③은 조용히 폐기(콘솔 경고만).
+async function handleIncomingWrap(rawEvent) {
+  if (await hasSeenWrap(rawEvent.id)) return;
+  await markSeenWrap(rawEvent.id);
+
+  let rumor;
+  try {
+    rumor = unwrapIncoming(identity, rawEvent);
+  } catch (err) {
+    console.warn("mildam: gift wrap unwrap failed, discarding", err);
+    return;
+  }
+
+  const contact = await getContact(rumor.pubkey);
+  if (!contact) {
+    console.warn("mildam: wrap from a sender not in contacts, discarding");
+    return;
+  }
+
+  const mgr = (await getSession(rumor.pubkey)) || createManager(identity.pk, rumor.pubkey);
+  let decrypted;
+  try {
+    decrypted = await decryptPayload(identity, mgr, rumor);
+  } catch (err) {
+    console.warn("mildam: pfs decrypt failed, discarding", err);
+    return;
+  }
+  await saveSession(rumor.pubkey, mgr);
+
+  const lastSync = await getLastSync();
+  if (rawEvent.created_at > lastSync) await setLastSync(rawEvent.created_at);
+
+  const payload = decrypted.payload;
+  if (!payload || payload.v !== 3) return; // §6.5: 미지의 버전은 조용히 폐기
+
+  if (payload.kind === "text") {
+    if (await hasMessage(payload.id)) return; // §6.5: id 중복은 조용히 폐기
+    await addMessage({
+      id: payload.id, pk: rumor.pubkey, dir: "in", body: payload.body,
+      ts: payload.ts, status: "received",
+    });
+    try {
+      const ackPayload = { v: 3, kind: "ack", ref: payload.id, ts: Date.now() };
+      const ackWrapped = await buildOutgoingWrap(
+        identity, contact, mgr, te.encode(JSON.stringify(ackPayload))
+      );
+      await saveSession(rumor.pubkey, mgr);
+      await net.publishWrap(ackWrapped);
+    } catch (err) {
+      console.warn("mildam: failed to send ack", err);
+    }
+  } else if (payload.kind === "ack") {
+    await updateMessageStatus(payload.ref, "delivered");
+  }
+  // 그 외 kind는 §6.5에 따라 조용히 폐기(위 분기에 해당하지 않으면 아무 것도 하지 않음)
+}
+
+// 릴레이가 재접속 직후 여러 이벤트를 한꺼번에 밀어넣을 수 있다(§7.2 REQ 재생).
+// handleIncomingWrap 각각은 같은 상대의 pfs 세션을 "불러오기 → 갱신 →
+// 저장"하는 비원자적 read-modify-write이므로, 여러 건이 겹쳐 실행되면 뒤에
+// 끝난 저장이 앞선 저장을 덮어써 래칫 상태를 잃을 수 있다. 전역 직렬 큐로
+// 한 번에 하나씩만 처리해 이 경합을 막는다.
+let incomingQueue = Promise.resolve();
+
+async function startMessaging() {
+  net.onStateChange(updateConnectionBadges);
+  const lastSync = await getLastSync();
+  const since = Math.max(0, lastSync - 172800); // PLAN.md §7.2: gift wrap 시각 무작위화 폭(2일)
+  net.startReceiving(identity.pk, since, (rawEvent) => {
+    // .catch()가 매번 체인을 정상 종결시키므로, 앞선 이벤트 처리가 실패해도
+    // 다음 이벤트는 계속 순서대로 처리된다.
+    incomingQueue = incomingQueue
+      .then(() => handleIncomingWrap(rawEvent))
+      .catch((err) => console.warn("mildam: incoming wrap handling threw", err));
+  });
+}
+
 // ---------------------------------------------------------------- 이벤트 배선
 
 function wireEvents() {
@@ -212,6 +333,7 @@ async function boot() {
   }
   await renderContactsList();
   showView("view-contacts");
+  await startMessaging();
 }
 
 boot();

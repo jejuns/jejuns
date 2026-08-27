@@ -11,6 +11,7 @@ const PRECACHE = [
   "js/pfs.js",
   "js/crypto.js",
   "js/store.js",
+  "js/net.js",
   "vendor/nostr-tools.js",
   "icons/icon.svg",
   "manifest.webmanifest",
