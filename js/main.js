@@ -4,6 +4,7 @@ import {
   getIdentity, saveIdentity, getAllContacts, addContact, contactExists, getContact,
   getSession, saveSession, addMessage, hasMessage, updateMessageStatus,
   getMessagesByContact, getLastSync, setLastSync, hasSeenWrap, markSeenWrap,
+  pruneSeenWraps,
 } from "./store.js";
 import {
   generateIdentity, encodeInviteCode, parseInviteCode, verifyInviteSignature,
@@ -18,6 +19,7 @@ const ERRORS = {
   E01: "초대코드 형식이 올바르지 않습니다",
   E04: "자기 자신은 추가할 수 없습니다",
   E05: "이미 추가된 친구입니다",
+  E07: "전송에 실패했습니다. 네트워크 확인 후 메시지를 탭해 다시 보내세요.",
   E08: "초대코드 검증에 실패했습니다. 상대에게 코드를 다시 받아 확인하세요.",
 };
 
@@ -209,15 +211,21 @@ async function handleChatSend(event) {
 
   input.value = "";
   sendBtn.disabled = true;
+  let result;
   try {
-    await sendText(contact, body);
+    result = await sendText(contact, body);
   } finally {
     sendBtn.disabled = net.getState() !== "online";
   }
+  if (!result.ok) toast(ERRORS.E07);
   await renderChatMessages(currentChatPk);
 }
 
-async function resendMessage(msg) {
+function resendMessage(msg) {
+  return enqueueSessionOp(() => resendMessageLocked(msg));
+}
+
+async function resendMessageLocked(msg) {
   const contact = await getContact(msg.pk);
   if (!contact) return;
   const mgr = (await getSession(contact.pk)) || createManager(identity.pk, contact.pk);
@@ -226,7 +234,7 @@ async function resendMessage(msg) {
   await saveSession(contact.pk, mgr);
   const result = await net.publishWrap(wrapped);
   await updateMessageStatus(msg.id, result.ok ? "sent" : "failed");
-  if (!result.ok) toast("전송에 실패했습니다. 네트워크 확인 후 메시지를 탭해 다시 보내세요.");
+  if (!result.ok) toast(ERRORS.E07);
   await refreshChatIfOpen(msg.pk);
 }
 
@@ -340,9 +348,25 @@ function updateConnectionBadges(state) {
 
 // ---------------------------------------------------------------- 발신·수신 파이프라인 (§6.6, §7)
 
+// pfs 세션은 "불러오기 → 갱신 → 저장"하는 비원자적 read-modify-write다
+// (PLAN.md §8.2). 같은 상대에 대해 이 사이클이 두 개 이상 겹쳐 실행되면
+// 나중에 끝난 저장이 앞선 저장을 덮어써 래칫 상태를 잃는다 — 내가 상대에게
+// 보내는 메시지, 상대의 메시지에 대한 자동 ack, 수신 처리 자체가 모두
+// 같은 세션을 건드리므로 이 셋을 하나의 전역 큐로 완전히 직렬화한다.
+let opQueue = Promise.resolve();
+function enqueueSessionOp(taskFn) {
+  const result = opQueue.then(taskFn, taskFn);
+  opQueue = result.then(() => {}, () => {}); // 큐 자체는 항상 계속 진행되어야 함
+  return result;
+}
+
 // 새 메시지를 상대에게 암호화해 발행한다. 성공 여부와 무관하게 로컬에는
 // 즉시 저장한다(상태만 sent/failed로 갈린다 — PLAN.md §8.1).
-export async function sendText(contact, body) {
+export function sendText(contact, body) {
+  return enqueueSessionOp(() => sendTextLocked(contact, body));
+}
+
+async function sendTextLocked(contact, body) {
   const mgr = (await getSession(contact.pk)) || createManager(identity.pk, contact.pk);
   const payload = { v: 3, kind: "text", id: crypto.randomUUID(), body, ts: Date.now() };
   const wrapped = await buildOutgoingWrap(identity, contact, mgr, te.encode(JSON.stringify(payload)));
@@ -420,23 +444,15 @@ async function handleIncomingWrap(rawEvent) {
   // 그 외 kind는 §6.5에 따라 조용히 폐기(위 분기에 해당하지 않으면 아무 것도 하지 않음)
 }
 
-// 릴레이가 재접속 직후 여러 이벤트를 한꺼번에 밀어넣을 수 있다(§7.2 REQ 재생).
-// handleIncomingWrap 각각은 같은 상대의 pfs 세션을 "불러오기 → 갱신 →
-// 저장"하는 비원자적 read-modify-write이므로, 여러 건이 겹쳐 실행되면 뒤에
-// 끝난 저장이 앞선 저장을 덮어써 래칫 상태를 잃을 수 있다. 전역 직렬 큐로
-// 한 번에 하나씩만 처리해 이 경합을 막는다.
-let incomingQueue = Promise.resolve();
-
 async function startMessaging() {
   net.onStateChange(updateConnectionBadges);
   const lastSync = await getLastSync();
   const since = Math.max(0, lastSync - 172800); // PLAN.md §7.2: gift wrap 시각 무작위화 폭(2일)
   net.startReceiving(identity.pk, since, (rawEvent) => {
-    // .catch()가 매번 체인을 정상 종결시키므로, 앞선 이벤트 처리가 실패해도
-    // 다음 이벤트는 계속 순서대로 처리된다.
-    incomingQueue = incomingQueue
-      .then(() => handleIncomingWrap(rawEvent))
-      .catch((err) => console.warn("mildam: incoming wrap handling threw", err));
+    // sendText/resendMessage와 같은 큐를 타야 세션 경합이 완전히 막힌다.
+    enqueueSessionOp(() => handleIncomingWrap(rawEvent)).catch((err) =>
+      console.warn("mildam: incoming wrap handling threw", err)
+    );
   });
 }
 
@@ -489,6 +505,7 @@ async function boot() {
     showView("view-onboarding");
     return;
   }
+  await pruneSeenWraps(); // PLAN.md §8.1: 부팅 시 7일 지난 seenWraps 항목 정리
   await renderContactsList();
   showView("view-contacts");
   await startMessaging();
