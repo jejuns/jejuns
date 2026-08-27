@@ -1,81 +1,93 @@
-# 밀담(Mildam) — 서버리스 종단간 암호화 메신저 구현 설계서 v1.0
+# 밀담(Mildam) — 서버리스 종단간 암호화 메신저 구현 설계서 v2.0
 
 > **이 문서는 구현 담당 AI(Sonnet)를 위한 유일한 사양서다.**
 > 이 문서에 적힌 대로만 구현한다. 여기에 없는 기능은 만들지 않고,
 > 여기에 적힌 결정은 바꾸지 않는다. §14(모호성 해결 규칙)와 §15(금지사항)를
 > 가장 먼저 읽을 것.
+>
+> v1.0(WebRTC 실시간 P2P 방식)은 폐기되었다. v2.0은 **비동기 전달**
+> (상대가 꺼져 있어도 보내두면 나중에 받음)을 지원하는 현재 유효한 사양이다.
 
 ---
 
 ## 1. 목표
 
 - 두 사람이 1:1로 텍스트 메시지를 주고받는 메신저.
-- **모든 메시지는 종단간(E2E) 암호화**된다. 중간의 어떤 서버·릴레이도 평문을 볼 수 없다.
-- **운영자가 유지하는 서버가 없다.** 메시지는 WebRTC로 기기 간 직접(P2P) 전달된다.
+- **비동기 전달**: 상대가 접속해 있지 않아도 메시지를 보낼 수 있고, 상대는
+  나중에 앱을 열면 밀린 메시지를 받는다. (일반 메신저와 같은 사용성)
+- **모든 메시지는 종단간(E2E) 암호화**된다. 전달·보관을 중개하는 어떤
+  릴레이도 평문을 볼 수 없다.
+- **운영자가 유지하는 서버가 없다.** 전달·임시 보관은 전 세계에 공개된
+  무료 Nostr 릴레이(공용 인프라)가 담당한다. 우리는 아무 서버도 운영하지 않는다.
 - **갤럭시(Android Chrome/삼성인터넷)와 아이폰(iOS Safari 16.4+) 모두에서 동작**하는
   설치형 웹앱(PWA)이다. 앱스토어 배포 없음.
 - 순수 HTML/CSS/JS로 구현한다. 프레임워크·빌드 도구 없음.
 
-### 1.1 비목표 (v1에서 만들지 않는 것)
+### 1.1 비목표 (v2에서 만들지 않는 것)
 
 - 그룹 채팅, 음성/영상 통화, 파일·이미지 전송, 스티커
-- 푸시 알림 (자체 서버가 없으므로 원천적으로 불가 — §2 참고)
-- 오프라인 상대에게 메시지 저장 후 전달 (양쪽이 동시에 접속해야 대화 가능)
-- 다중 기기 동기화, 계정 복구
-- QR 코드 스캔 (v1은 초대코드 복사/붙여넣기만. QR은 v2)
-- 앱 잠금(PIN), 저장 메시지 암호화(at-rest) — v2
+- 푸시 알림 (자체 서버가 없으므로 불가 — §2 참고. 앱을 열어야 새 메시지 확인)
+- 다중 기기 동기화, 계정 백업/복구, 다른 Nostr 클라이언트와의 상호운용
+- QR 코드 스캔 (초대코드 복사/붙여넣기만. QR은 v3)
+- 앱 잠금(PIN), 저장 메시지 암호화(at-rest), 전방 비밀성(PFS) — v3 후보
 
 ## 2. 정직한 한계 (사용자에게도 앱 내에 고지할 것 — §9.7 문자열 참고)
 
 서버가 없다는 선택의 대가를 명시한다. 구현자는 이 한계를 "개선"하려고
 서버를 추가하면 안 된다.
 
-| 한계 | 이유 |
+| 한계 | 이유·완화 |
 |---|---|
-| 두 사람이 **동시에 앱을 켜야** 대화 가능 | 메시지를 보관할 서버가 없음 |
-| 푸시 알림 없음 | 푸시는 서버 필요 |
-| 시그널링에 공개 Nostr 릴레이 사용 → 릴레이는 **접속 시각·방 ID·IP**를 볼 수 있음(메시지 내용은 절대 볼 수 없음) | WebRTC 연결 성립에는 최소한의 중개가 필요. 릴레이가 보는 시그널링 데이터도 room 비밀번호로 암호화됨(§7.2) |
+| **푸시 알림 없음.** 새 메시지는 앱(또는 홈 화면 아이콘)을 열어야 확인 | 푸시 발송에는 서버가 필요. 앱을 열면 밀린 메시지가 즉시 전부 도착하고, 열려 있는 동안은 실시간 수신됨 |
+| 상대가 오래(수 주 이상) 접속하지 않으면 메시지가 유실될 수 있음 | 공개 릴레이의 보관 기간은 보장이 없음. 4개 릴레이에 중복 발행해 완화(§7.1). 보관을 보장하려면 서버가 필요하므로 v2에서는 수용 |
+| 릴레이는 **수신자 공개키(수신함 주소), 암호문 크기, 접속 IP**를 볼 수 있음. 발신자는 은닉되고(§6 gift wrap) 시각은 ±최대 2일 무작위화됨. 내용은 절대 볼 수 없음 | 프로토콜 특성. IP 은닉(VPN/Tor)은 범위 밖 |
+| **전방 비밀성(PFS) 없음**: 기기의 개인키가 유출되고 공격자가 과거 암호문을 수집해 두었다면 과거 대화가 복호될 수 있음 | 비동기 전달(상대 부재중 암호화)의 구조적 대가. 표준(NIP-44, 외부 보안감사 완료)의 알려진 트레이드오프. v3에서 세션 갱신 검토 |
 | 웹 배포 특성상, 호스팅(GitHub Pages)이 악성 코드를 서빙하면 이론상 보안이 깨짐 | 웹앱의 근본 한계. 코드는 전부 저장소에 공개되어 검증 가능하게 유지 |
-| iOS는 PWA 저장소를 드물게 정리할 수 있음 | `navigator.storage.persist()` 요청으로 완화(§8.4) |
+| iOS는 PWA 저장소를 드물게 정리할 수 있음(신원키 유실 위험) | `navigator.storage.persist()` 요청으로 완화(§8.4). 백업 기능은 비목표 |
 
 ## 3. 아키텍처 확정
 
 ```
-[내 폰: PWA]  ←── WebRTC DataChannel (DTLS + 앱계층 AES-GCM) ──→  [상대 폰: PWA]
-      │                                                                │
-      └───── 시그널링만: Trystero(nostr 전략, 공개 릴레이) ─────────────┘
+[내 폰: PWA] ── 암호문 발행/구독(WebSocket) ──> [공개 Nostr 릴레이 4곳] <── 구독/발행 ── [상대 폰: PWA]
+                                                (암호문만 임시 보관·중계.
+                                                 누구의 소유도 아닌 공용 인프라)
 
 정적 파일 호스팅: GitHub Pages (메시지는 절대 경유하지 않음, HTML/JS만 서빙)
 ```
 
 - **호스팅**: GitHub Pages. 이 저장소의 기본 브랜치 루트(`/`)에서 서빙.
-  정적 파일만 서빙하므로 "지정 서버 없음" 조건을 만족(유지비 0, 메시지 미경유).
-- **P2P 연결**: [Trystero](https://github.com/dmotz/trystero) 라이브러리,
-  **nostr 전략** (공개 Nostr 릴레이를 시그널링에만 사용). 라이브러리는 런타임
-  CDN 로드 금지 — 저장소에 벤더링(§4.2).
-- **전송 암호화는 3중**: (1) WebRTC 기본 DTLS, (2) Trystero room password에 의한
-  시그널링 암호화, (3) **이 문서가 정의하는 앱 계층 E2E 암호화(§6)**.
-  (1)(2)가 있어도 (3)을 생략하지 않는다 — "누구도 열 수 없다"의 근거는 (3)이다.
+- **전송·보관**: [Nostr](https://github.com/nostr-protocol/nips) 프로토콜의
+  공개 릴레이. 메시지는 **NIP-17 (Private Direct Messages)** 규격의 암호화
+  이벤트로 발행한다. 즉:
+  - 암호화: **NIP-44 v2** (secp256k1 ECDH → HKDF → ChaCha20 → HMAC-SHA256,
+    Cure53 보안감사 완료 표준)
+  - 메타데이터 은닉: **NIP-59 gift wrap** (발신자 익명화 + 시각 무작위화)
+- **암호 구현은 직접 만들지 않는다.** 검증된 라이브러리
+  `nostr-tools`의 구현을 그대로 사용한다(§4.2). 자체 암호 코드 작성 금지.
+- 수신은 릴레이 WebSocket 구독으로: 앱이 열려 있으면 실시간 도착, 닫혀
+  있던 동안의 메시지는 열 때 한꺼번에 도착.
 
 ## 4. 기술 스택 확정 (변경 금지)
 
 - HTML5 + CSS + **바닐라 JavaScript (ES2020, ES Modules)**. 프레임워크 금지,
   TypeScript 금지, 번들러/빌드 도구 금지, npm 의존성 금지.
-- 암호화: **브라우저 내장 WebCrypto (`crypto.subtle`)만 사용.** 외부 암호화
-  라이브러리(libsodium 등) 금지.
 - 저장소: **IndexedDB** (키·연락처·메시지). `localStorage`는 §8.3에 명시된
   1개 용도 외 금지.
-- 외부 라이브러리는 **Trystero 단 하나**, 벤더링해서 사용.
+- 외부 라이브러리는 **nostr-tools 단 하나**, 벤더링해서 사용.
 
-### 4.2 Trystero 벤더링 절차
+### 4.2 nostr-tools 벤더링 절차
 
-1. jsDelivr에서 nostr 전략 번들 파일을 내려받는다:
-   `https://cdn.jsdelivr.net/npm/trystero@0.21.6/dist/trystero-nostr.min.js`
-   (0.21.6이 존재하지 않으면 0.21.x 최신 패치 버전을 사용하고, 사용한 정확한
-   버전을 `vendor/VERSION.txt`에 기록한다. 0.21.x 자체가 없으면 §14 규칙 A 적용.)
-2. `vendor/trystero-nostr.min.js`로 저장하고 커밋한다.
-3. 코드에서는 `import {joinRoom} from "../vendor/trystero-nostr.min.js"` 형태로만
-   로드한다. 런타임에 CDN·외부 URL 로드 금지.
+1. jsDelivr에서 의존성이 모두 포함된 ESM 번들을 내려받는다:
+   `https://cdn.jsdelivr.net/npm/nostr-tools@2/+esm`
+   (2.x 최신 버전으로 해석된다. 실제 받아진 정확한 버전을
+   `vendor/VERSION.txt`에 기록한다.)
+2. `vendor/nostr-tools.js`로 저장하고 커밋한다.
+3. 코드에서는 `import {…} from "../vendor/nostr-tools.js"` 형태로만 로드한다.
+   런타임에 CDN·외부 URL 로드 금지(릴레이 WebSocket 제외).
+4. 사용할 기능: 키 생성/공개키 유도, 이벤트 서명, `SimplePool`(다중 릴레이
+   발행·구독), NIP-17/NIP-44/NIP-59 구현(`nip17` 모듈이 있으면 그것을,
+   없으면 `nip59`+`nip44` 모듈 조합을 사용). 정확한 export 이름은 벤더링한
+   버전의 실제 API를 따른다(§14 규칙 B).
 
 ## 5. 파일 구조 확정
 
@@ -85,12 +97,12 @@
 ├── css/style.css
 ├── js/
 │   ├── main.js         부팅, 화면 전환, 이벤트 바인딩 (오케스트레이션만)
-│   ├── crypto.js       §6의 암호화 사양 구현 (WebCrypto 래퍼)
-│   ├── net.js          §7의 Trystero 연결·핸드셰이크 상태기계
-│   ├── store.js        §8의 IndexedDB 접근 계층
+│   ├── crypto.js       §6 구현: 키·초대코드·안전코드·NIP-17 wrap/unwrap 래퍼
+│   ├── net.js          §7 구현: SimplePool 관리, 발행·구독, 연결 상태
+│   ├── store.js        §8 구현: IndexedDB 접근 계층
 │   └── util.js         base64url·hex 변환, UTF-8 인코딩 헬퍼
 ├── vendor/
-│   ├── trystero-nostr.min.js
+│   ├── nostr-tools.js
 │   └── VERSION.txt
 ├── icons/icon.svg      §10.3의 SVG 마크업 그대로
 ├── manifest.webmanifest
@@ -101,157 +113,142 @@
 
 모듈 간 의존 방향: `main.js → (net.js, store.js, crypto.js) → util.js`.
 `crypto.js`·`store.js`·`net.js`는 DOM을 만지지 않는다.
+vendor를 import하는 파일은 `crypto.js`와 `net.js`뿐이다.
 
-## 6. 암호화 사양 (한 글자도 바꾸지 말 것)
+## 6. 신원·암호화 사양 (한 글자도 바꾸지 말 것)
 
 ### 6.1 인코딩 규약
 
 - 바이너리 ↔ 문자열: **base64url, 패딩(`=`) 없음.** `util.js`에
-  `bufToB64u(ArrayBuffer|Uint8Array): string`, `b64uToBuf(string): Uint8Array` 구현.
-- 지문 표기: 소문자 hex.
+  `bufToB64u`, `b64uToBuf` 구현. 공개키·이벤트 id는 Nostr 관례대로
+  **64자 소문자 hex**.
 - 문자열 → 바이트: 항상 UTF-8 (`new TextEncoder()`).
+- 난수가 필요하면 `crypto.getRandomValues` 또는 nostr-tools 제공 함수만.
+  `Math.random` 금지.
 
-### 6.2 신원 키 (장기 키)
+### 6.2 신원 키
 
-- 최초 실행 시 1회 생성:
-  `crypto.subtle.generateKey({name:"ECDSA", namedCurve:"P-256"}, false, ["sign","verify"])`
-  — `extractable:false` 고정. 개인키는 CryptoKey 객체 그대로 IndexedDB에 저장(§8.2).
-- 공개키 직렬화: `crypto.subtle.exportKey("raw", publicKey)` → 65바이트 → base64url.
-  이하 `idPub`라 부른다.
-- **지문(fingerprint)**: `SHA-256(raw 공개키 65바이트)` → 64자 소문자 hex.
-  이하 `fp`라 부른다. 연락처의 기본 키(primary key)로 사용.
+- 최초 실행 시 1회, nostr-tools의 키 생성 함수로 secp256k1 개인키(32바이트)를
+  만들고 공개키(x-only 64자 hex, 이하 `pk`)를 유도한다.
+- 개인키는 IndexedDB `meta`에만 저장한다(§8.2). 화면 표시·내보내기·전송·로그 금지.
+- **지문 = `pk`** (64자 hex). 연락처의 기본 키(primary key)로 사용.
 
 ### 6.3 초대코드 (친구 추가)
 
-- 형식: `MD1.` + base64url( UTF-8( JSON `{"v":1,"name":<내 이름>,"pk":<idPub>}` ) )
-- 파싱 규칙: 접두사가 `MD1.`이 아니거나, JSON 파싱 실패, `v !== 1`, `pk`를
-  raw ECDSA P-256 공개키로 import 실패 → 오류 E01(§11).
+- 형식: `MD2.` + base64url( UTF-8( JSON `{"v":2,"name":<내 이름>,"pk":<pk>}` ) )
+- 파싱 규칙: 접두사가 `MD2.`가 아니거나, JSON 파싱 실패, `v !== 2`,
+  `pk`가 64자 소문자 hex가 아니면 → 오류 E01(§11).
 - 친구 추가는 **상호 교환**이다: A가 B의 코드를 등록하고, B도 A의 코드를
-  등록해야 대화방이 성립한다. 앱은 이를 §9.3 화면에서 안내한다.
+  등록해야 서로의 메시지를 표시한다(§7.3 — 미등록 발신자의 메시지는 버린다).
 - 초대코드는 비밀이 아니라 **공개키**다. 다만 진짜 상대의 코드인지가 보안의
   전제이므로, "신뢰할 수 있는 경로(직접 만나서, 이미 신뢰하는 채널)로
   교환하라"는 안내 문구를 표시한다(§9.7 S12).
 
-### 6.4 방(room) 식별자
+### 6.4 메시지 암호화 (NIP-17 사용법)
 
-두 지문을 사전순 정렬해 유도한다 (양쪽에서 동일 값이 나온다):
+- **발신**: 애플리케이션 페이로드(§6.5)를 본문으로 하는 kind 14 rumor를 만들고,
+  nostr-tools의 NIP-17/59 구현으로 **수신자 `pk` 앞으로 gift wrap(kind 1059)**
+  하여 발행한다. 라이브러리 기본 동작(NIP-44 v2 암호화, 1회용 랜덤 발신키,
+  created_at 무작위화)을 그대로 쓴다 — 파라미터 커스터마이즈 금지.
+- rumor의 `content`는 §6.5의 JSON 문자열이다. (표준 NIP-17 클라이언트와의
+  상호운용은 비목표이므로 content가 JSON인 것은 의도된 결정.)
+- **수신**: kind 1059 이벤트를 내 개인키로 unwrap한다. 실패(복호 불가·서명
+  불일치·형식 오류)하면 그 이벤트는 **조용히 폐기**하고 `console.warn` 1줄만
+  남긴다(공개 수신함에는 스팸이 올 수 있으므로 오류 UI를 띄우지 않는다).
+- unwrap 결과에서 **발신자 `pk`가 저장된 연락처에 없으면 폐기**한다(§7.3).
 
-```
-roomId   = hex( SHA-256( UTF-8( "mildam-room-v1|" + min(fpA,fpB) + "|" + max(fpA,fpB) ) ) )   // 64자 hex
-roomPw   = hex( SHA-256( UTF-8( "mildam-pw-v1|"   + roomId ) ) )                              // Trystero password
-```
+### 6.5 애플리케이션 페이로드 (rumor content의 JSON)
 
-### 6.5 세션 수립 핸드셰이크 (연결할 때마다 새로 수행 — 전방 비밀성)
+| 필드 | 값 |
+|---|---|
+| `v` | `2` 고정 |
+| `kind` | `"text"` 또는 `"ack"` |
+| `id` | 메시지 고유 id: `crypto.randomUUID()` (text만) |
+| `body` | 본문 문자열 (text만, 최대 2000자) |
+| `ref` | 확인 대상 메시지의 `id` (ack만) |
+| `ts` | 발신 시각 `Date.now()` (밀리초) |
 
-연결마다 임시(ephemeral) ECDH 키를 만들고 신원키로 서명해 교환한다.
+- `v !== 2`이거나 알 수 없는 `kind`는 조용히 폐기.
+- **수신 처리(text)**: 같은 `id`를 이미 저장했으면 중복 폐기(릴레이 4곳
+  중복 수신 대비). 아니면 저장(§8.2) 후 `ack`(ref=그 id)를 발신자에게 회신.
+- **수신 처리(ack)**: `ref`에 해당하는 내 발신 메시지의 상태를
+  `delivered`로 갱신. 없으면 무시.
+- 표시 순서는 `ts` 기준 오름차순 (gift wrap의 겉 시각은 무작위이므로 사용 금지).
 
-1. 임시 키 생성:
-   `crypto.subtle.generateKey({name:"ECDH", namedCurve:"P-256"}, false, ["deriveBits"])`
-   → 공개키 raw export → base64url = `ephPub`.
-2. 서명: `sig = base64url( ECDSA-SHA256.sign( idPriv, UTF-8("mildam-hs-v1|" + roomId + "|" + ephPub) ) )`
-3. `hello` 메시지(§7.4) 송신: `{"t":"hello","v":1,"idPub":…,"ephPub":…,"sig":…}`
-4. 수신 측 검증 (하나라도 실패 시 세션 중단 + 오류 E02):
-   - `idPub`이 **저장된 연락처의 idPub과 바이트 단위로 완전히 동일**한가.
-     (다르면 중간자 공격 가능성 — 절대 자동 갱신하지 않는다.)
-   - `sig`가 그 `idPub`으로 검증되는가 (같은 문자열 `"mildam-hs-v1|"+roomId+"|"+ephPub` 대상).
-5. 세션 키 유도 (양측 동일):
-   ```
-   secret  = ECDH.deriveBits( myEphPriv, peerEphPub, 256 )            // 256비트
-   salt    = SHA-256( UTF-8( roomId + "|" + min(ephA,ephB) + "|" + max(ephA,ephB) ) )
-             // ephA/ephB = 양측 ephPub의 base64url 문자열, 사전순 정렬
-   hkdfKey = importKey("raw", secret, "HKDF", false, ["deriveKey"])
-   sessKey = deriveKey({name:"HKDF", hash:"SHA-256", salt, info: UTF-8("mildam-msg-v1")},
-                        hkdfKey, {name:"AES-GCM", length:256}, false, ["encrypt","decrypt"])
-   ```
-6. 세션 상태 초기화: `sendSeq = 0`, `recvSeq = 0`.
-
-### 6.6 메시지 암호화
-
-- 평문 페이로드: JSON `{"kind":"text","body":<본문 문자열>,"ts":<Date.now()>}`
-- 송신 시 `sendSeq += 1` 후:
-  ```
-  iv  = crypto.getRandomValues(new Uint8Array(12))                       // 매번 새로
-  aad = UTF-8( "mildam-msg-v1|" + roomId + "|" + myFp + "|" + sendSeq )
-  ct  = AES-GCM.encrypt({iv, additionalData: aad}, sessKey, UTF-8(평문 JSON))
-  ```
-- 와이어 포맷(§7.4): `{"t":"msg","v":1,"seq":<sendSeq>,"iv":<b64u>,"ct":<b64u>}`
-- 수신 측: `seq <= recvSeq`이면 **복호 없이 폐기**(리플레이 방지).
-  AAD는 `상대 fp`와 수신한 `seq`로 재구성해 복호. 복호 실패(GCM 태그 불일치) 시
-  해당 메시지 폐기 + 오류 E03 표시. 성공 시 `recvSeq = seq`.
-- 수신 확인: 복호 성공 시 `{"t":"ack","v":1,"seq":<seq>}` 회신.
-  송신 측은 ack 수신 시 해당 메시지 상태를 `sent → delivered`로 갱신(§8.2).
-
-### 6.7 안전코드 (수동 검증)
+### 6.6 안전코드 (수동 검증)
 
 ```
-safety = hex( SHA-256( UTF-8( "mildam-safety-v1|" + min(fpA,fpB) + "|" + max(fpA,fpB) ) ) )
+safety = hex( SHA-256( UTF-8( "mildam-safety-v2|" + min(pkA,pkB) + "|" + max(pkA,pkB) ) ) )
 ```
-64자 hex를 **8자씩 8그룹**으로 표시. 두 사람 화면에 같은 값이 떠야 정상.
-§9.5 화면에서 표시만 한다(스캔·자동 비교 없음).
+(SHA-256은 WebCrypto `crypto.subtle.digest` 사용.) 64자 hex를 **8자씩
+8그룹**으로 표시. 두 사람 화면에 같은 값이 떠야 정상. §9.5 화면에서 표시만
+한다(스캔·자동 비교 없음).
 
-### 6.8 명시적 보안 규칙
+### 6.7 명시적 보안 규칙
 
-- 개인키·세션키·평문을 `console.log`, 네트워크, `localStorage`에 절대 남기지 않는다.
-- 모든 `generateKey`/`deriveKey`는 `extractable:false`.
-- IV 재사용 금지(항상 `getRandomValues`). seq를 IV로 쓰지 않는다.
-- 난수는 `crypto.getRandomValues`만. `Math.random` 금지.
+- 개인키·평문을 `console.log`, 릴레이 외 네트워크, `localStorage`에 절대 남기지 않는다.
+- NIP-44/59를 우회하는 자체 암호화 경로를 만들지 않는다. 평문 kind(1, 4 등)
+  이벤트를 발행하는 코드는 어디에도 존재하면 안 된다.
+- 발행 직전, 이벤트 kind가 1059가 아니면 발행을 거부하는 가드를 `net.js`에 둔다.
 
 ## 7. 네트워킹 사양
 
-### 7.1 라이브러리 사용 형태
-
-```js
-import {joinRoom} from "../vendor/trystero-nostr.min.js";
-const room = joinRoom({appId: "mildam-v1", password: roomPw}, roomId);
-const [sendE2e, onE2e] = room.makeAction("e2e");   // 액션은 "e2e" 단 하나
-```
-- 모든 앱 메시지(hello/msg/ack)는 `sendE2e(<JSON 문자열>)`로 보낸다.
-- Trystero 기본 릴레이/STUN 설정을 그대로 쓴다(커스텀 릴레이 목록 지정 금지).
-
-### 7.2 연결 정책
-
-- 연락처마다 room 1개. **채팅방 화면에 들어가 있는 동안만** `joinRoom`하고,
-  나가면 `room.leave()`. (모든 연락처에 상시 연결하지 않는다 — 배터리·릴레이 부하)
-- `room.onPeerJoin` → 즉시 §6.5 핸드셰이크 시작(양측 모두 hello를 보낸다).
-- `room.onPeerLeave` → 세션 폐기(`sessKey`, seq 초기화), UI 상태 `offline`.
-
-### 7.3 연결 상태기계 (UI 표시용, §9.4)
+### 7.1 릴레이 목록 (고정 — 코드 상수 `RELAYS`)
 
 ```
-idle → joining(room 참가 직후) → waiting(피어 없음) → handshaking(피어 있음, hello 교환 중)
-     → secure(핸드셰이크 완료: 이때만 입력창 활성화) → offline(피어 이탈 → waiting으로 복귀 가능)
-     오류 발생 시 → error(E02 등)
+wss://relay.damus.io
+wss://nos.lol
+wss://relay.primal.net
+wss://offchain.pub
 ```
-`secure`가 아닌 상태에서 전송 버튼은 비활성화한다. 큐잉·자동 재전송은 만들지 않는다.
+- 발행: 4곳 모두에 시도. **1곳 이상 OK 응답이면 성공**으로 간주(상태 `sent`).
+  4곳 전부 실패 시 오류 E07, 메시지 상태 `failed`(재전송 버튼 §9.4).
+- 구독: 4곳 모두에 동일 필터로 구독, 이벤트 id로 중복 제거(§6.5).
+- 사용자 설정으로 릴레이를 바꾸는 UI는 만들지 않는다(v3).
 
-### 7.4 와이어 메시지 3종 (이 외의 타입 금지)
+### 7.2 구독 필터와 동기화 커서
 
-| t | 방향 | 필드 |
-|---|---|---|
-| `hello` | 양방향, 세션당 1회 | `v`, `idPub`, `ephPub`, `sig` |
-| `msg` | 양방향 | `v`, `seq`, `iv`, `ct` |
-| `ack` | 수신→송신 | `v`, `seq` |
+- 필터: `{ kinds: [1059], "#p": [<내 pk>], since: max(0, lastSync - 172800) }`
+  (172800초 = 2일. gift wrap 시각이 과거로 최대 2일 무작위화되기 때문.)
+- `lastSync`(초 단위 Unix time)는 `meta`에 저장. 앱 시작 시 읽고, 이벤트를
+  정상 처리할 때마다 `max(lastSync, 처리한 wrap의 created_at)`로 갱신.
+  최초 실행 시 `lastSync = 신원 생성 시각`.
+- 중복 수신은 §6.5의 `id` 중복 제거가 최종 방어선이므로 커서가 다소
+  과거여도 정확성에는 문제없다.
 
-`v !== 1`이거나 알 수 없는 `t`는 조용히 폐기하고 `console.warn` 1줄만 남긴다.
+### 7.3 수신 게이트
+
+unwrap에 성공했더라도 발신자 `pk`가 `contacts`에 없으면 저장·표시·ack 없이
+폐기한다. (모르는 사람이 내 수신함 주소로 보내는 스팸 차단. "요청함" UI는 v3.)
+
+### 7.4 연결 상태기계 (UI 표시용, §9.4)
+
+```
+connecting(구독 시작 중) → online(1곳 이상 연결됨) → offline(연결된 릴레이 0곳)
+```
+- 상태는 SimplePool의 연결 상태로 판단하되, 구현이 노출하는 API가 제한적이면
+  "구독 성공 = online, 전 릴레이 오류/close = offline"의 근사로 충분하다.
+- **전송 버튼은 online에서만 활성.** offline에서 자동 재연결을 30초 간격으로
+  시도한다. 미전송 큐·자동 재전송은 만들지 않는다(실패는 `failed` + 수동 재전송).
 
 ## 8. 저장소 사양 (IndexedDB)
 
 ### 8.1 DB 정의
 
-- DB 이름 `mildam`, 버전 `1`. 오브젝트 스토어 3개:
+- DB 이름 `mildam`, 버전 `2`. 오브젝트 스토어 3개:
 
 | 스토어 | keyPath | 내용 |
 |---|---|---|
-| `meta` | `k` | `{k:"identity", priv:<CryptoKey>, pub:<CryptoKey>, idPub:<b64u>, fp, name, createdAt}` 1건 |
-| `contacts` | `fp` | `{fp, name, idPub, addedAt}` |
-| `messages` | 자동 증가 `id` + 인덱스 `byContact`: `[fp, ts]` | `{fp, dir:"in"\|"out", body, ts, seq, status:"sent"\|"delivered"\|"received"}` |
+| `meta` | `k` | `{k:"identity", sk:<Uint8Array 32>, pk, name, createdAt}` 1건, `{k:"lastSync", value:<초>}` 1건 |
+| `contacts` | `pk` | `{pk, name, addedAt}` |
+| `messages` | `id` (§6.5의 uuid) + 인덱스 `byContact`: `[pk, ts]` | `{id, pk:<상대 pk>, dir:"in"\|"out", body, ts, status:"sent"\|"delivered"\|"received"\|"failed"}` |
 
 ### 8.2 규칙
 
-- CryptoKey는 구조화 복제로 IndexedDB에 직접 저장한다(직렬화 시도 금지).
-- 메시지 본문은 이 스토어에 평문 저장한다(**의도된 v1 결정** — 기기 잠금에
-  의존. at-rest 암호화는 v2. 이 결정을 바꾸지 말 것).
-- 수신 메시지는 복호 성공 직후, 송신 메시지는 send 직후 저장.
+- 메시지 본문은 평문 저장한다(**의도된 v2 결정** — 기기 잠금에 의존.
+  at-rest 암호화는 v3. 이 결정을 바꾸지 말 것).
+- 수신 text는 §6.5 처리 직후, 발신 text는 발행 시도 직후(`sent` 또는
+  `failed`로) 저장.
 
 ### 8.3 localStorage 허용 예외 (유일)
 
@@ -286,21 +283,24 @@ idle → joining(room 참가 직후) → waiting(피어 없음) → handshaking(
   `#add-copy` "내 코드 복사" (`navigator.clipboard.writeText`, 성공 시 S13 토스트).
 - 하단: 상대 코드 입력 `<textarea id="add-peercode">` + 버튼 `#add-submit` "친구 추가".
   파싱 성공 → contacts 저장 → S14 토스트 → 목록으로. 자기 자신 코드면 오류 E04.
-  이미 있는 fp면 오류 E05. 안내 문구 S12 상시 표시.
+  이미 있는 pk면 오류 E05. 안내 문구 S12 상시 표시.
 
 ### 9.4 `#view-contacts` / `#view-chat`
 
-- 목록: 연락처 이름 + 마지막 메시지 미리보기(있으면). 항목 탭 → 채팅방.
-  헤더에 `#nav-add` "＋ 친구 추가" 버튼. 연락처 0명이면 S11 표시.
-- 채팅방: 헤더(상대 이름, 연결 상태 배지 — §7.3 상태를 S20~S25로 표기,
-  `#chat-safety` "안전코드" 버튼, `#chat-back` 뒤로), 메시지 리스트(내 것 우측
-  accent, 상대 좌측 panel, 시각 HH:MM, 내 메시지에 상태 ✓=sent ✓✓=delivered),
-  하단 입력창 `#chat-input` + 전송 `#chat-send`(secure 상태에서만 활성).
-  입장 시 히스토리를 `byContact` 인덱스로 로드해 시간순 표시.
+- 목록: 연락처 이름 + 마지막 메시지 미리보기(있으면) + 마지막 메시지 이후
+  도착한 안 읽은 메시지 수 배지(채팅방 입장 시 0으로). 항목 탭 → 채팅방.
+  헤더에 `#nav-add` "＋ 친구 추가" 버튼과 연결 상태 배지(S20/S23/S26).
+  연락처 0명이면 S11 표시.
+- 채팅방: 헤더(상대 이름, 연결 상태 배지, `#chat-safety` "안전코드" 버튼,
+  `#chat-back` 뒤로), 메시지 리스트(내 것 우측 accent, 상대 좌측 panel,
+  시각 HH:MM, 내 메시지에 상태 ✓=sent ✓✓=delivered, `failed`면 ⚠ + 탭하면
+  재발행), 하단 입력창 `#chat-input` + 전송 `#chat-send`(online에서만 활성).
+  입장 시 히스토리를 `byContact` 인덱스로 로드해 `ts` 오름차순 표시.
+  수신은 목록·채팅방 어느 화면에서든 백그라운드로 계속 처리된다.
 
 ### 9.5 `#view-safety`
 
-- 상대 이름, §6.7 안전코드를 8자×8그룹 monospace로 표시, 설명 S30, 뒤로 버튼.
+- 상대 이름, §6.6 안전코드를 8자×8그룹 monospace로 표시, 설명 S30, 뒤로 버튼.
 
 ### 9.6 오류·토스트
 
@@ -311,18 +311,18 @@ idle → joining(room 참가 직후) → waiting(피어 없음) → handshaking(
 
 | ID | 문구 |
 |---|---|
-| S01 | 서버 없이 기기끼리 직접 연결되는 종단간 암호화 메신저입니다. 대화 내용은 두 사람의 기기 밖으로 나가지 않습니다. |
+| S01 | 자체 서버 없이 공개 릴레이로 암호문만 주고받는 종단간 암호화 메신저입니다. 대화 내용은 두 사람 외에는 누구도 읽을 수 없습니다. |
+| S02 | 알림 기능이 없으니 새 메시지는 앱을 열어 확인하세요. 상대가 꺼져 있어도 메시지는 전달됩니다. |
 | S11 | 아직 친구가 없습니다. ＋ 버튼으로 초대코드를 교환해 보세요. |
 | S12 | 초대코드는 직접 만나서 또는 이미 신뢰하는 다른 채널로 교환하세요. 서로 상대의 코드를 등록해야 대화가 시작됩니다. |
 | S13 | 코드가 복사되었습니다 |
 | S14 | 친구가 추가되었습니다 |
-| S20 | 연결 준비 중… |
-| S21 | 상대를 기다리는 중… (두 사람 모두 이 방에 들어와 있어야 연결됩니다) |
-| S22 | 보안 연결 수립 중… |
-| S23 | 🔒 보안 연결됨 |
-| S24 | 상대가 자리를 비웠습니다 |
-| S25 | 연결 오류 |
-| S30 | 두 사람의 화면에 같은 코드가 표시되면 대화가 도청·변조되지 않고 있다는 뜻입니다. 직접 만나거나 영상통화로 확인하세요. |
+| S20 | 연결 중… |
+| S23 | 🔒 암호화 연결됨 |
+| S26 | 오프라인 — 네트워크를 확인하세요 |
+| S30 | 두 사람의 화면에 같은 코드가 표시되면 대화 상대가 바꿔치기되지 않았다는 뜻입니다. 직접 만나거나 영상통화로 확인하세요. |
+
+(S02는 온보딩 화면에서 S01 아래에 함께 표시한다.)
 
 ## 10. PWA 사양
 
@@ -336,14 +336,14 @@ idle → joining(room 참가 직후) → waiting(피어 없음) → handshaking(
 `index.html` head에 manifest 링크, `theme-color` 메타, viewport
 (`width=device-width, initial-scale=1, viewport-fit=cover`),
 `apple-mobile-web-app-capable`/`apple-mobile-web-app-status-bar-style=black-translucent` 메타 포함.
-(iOS 홈 화면 아이콘 PNG는 v1 미지원 — 한계로 README에 기록.)
+(iOS 홈 화면 아이콘 PNG는 v2 미지원 — 한계로 README에 기록.)
 
 ### 10.2 sw.js
 
-- 캐시 이름 `mildam-v1` (릴리스마다 숫자 증가). `install`에서 §5의 정적 파일
+- 캐시 이름 `mildam-v2` (릴리스마다 숫자 증가). `install`에서 §5의 정적 파일
   전체를 precache, `activate`에서 이전 캐시 삭제 + `clients.claim()`,
   `fetch`는 same-origin GET에 한해 cache-first(미스 시 네트워크 후 캐시에 저장).
-  cross-origin 요청은 서비스 워커가 건드리지 않는다.
+  cross-origin 요청·WebSocket은 서비스 워커가 건드리지 않는다.
 
 ### 10.3 icons/icon.svg (이 마크업 그대로)
 
@@ -361,23 +361,24 @@ idle → joining(room 참가 직후) → waiting(피어 없음) → handshaking(
 
 | 코드 | 상황 | 사용자 문구 | 동작 |
 |---|---|---|---|
-| E01 | 초대코드 파싱/키 import 실패 | 초대코드 형식이 올바르지 않습니다 | 토스트만 |
-| E02 | hello 검증 실패(키 불일치·서명 오류) | ⚠️ 상대 확인에 실패했습니다. 연결을 차단했습니다. 안전을 위해 다른 채널로 상대에게 확인하세요. | `room.leave()`, 상태 error |
-| E03 | msg 복호 실패 | 메시지 하나를 해독하지 못해 버렸습니다 | 해당 메시지 폐기, 세션 유지 |
+| E01 | 초대코드 파싱 실패 | 초대코드 형식이 올바르지 않습니다 | 토스트만 |
 | E04 | 자기 코드 등록 시도 | 자기 자신은 추가할 수 없습니다 | 토스트만 |
 | E05 | 중복 연락처 | 이미 추가된 친구입니다 | 토스트만 |
 | E06 | WebCrypto/IndexedDB 미지원 브라우저 | 이 브라우저는 지원되지 않습니다. 최신 Chrome 또는 Safari를 사용하세요. | 부팅 중단, 전체 화면 안내 |
+| E07 | 4개 릴레이 전부 발행 실패 | 전송에 실패했습니다. 네트워크 확인 후 메시지를 탭해 다시 보내세요. | 메시지 상태 `failed` |
+
+(unwrap 실패·미등록 발신자는 오류가 아니라 조용한 폐기다 — §6.4, §7.3.)
 
 ## 12. 구현 순서와 단계별 완료 기준 (이 순서대로 커밋)
 
 | 단계 | 내용 | 완료 기준(전부 충족해야 다음 단계) |
 |---|---|---|
 | M0 | 골격: §5 파일 전부 생성, 화면 전환, manifest, sw, 벤더링 | 로컬 정적 서버로 열면 온보딩 화면 표시, Lighthouse에서 설치 가능 판정, 콘솔 오류 0 |
-| M1 | crypto.js: §6.1~6.4·6.7 + store.js + 온보딩·친구 추가 | 두 브라우저 프로필에서 각각 신원 생성 → 코드 상호 등록 성공, 새로고침 후에도 신원·연락처 유지, roomId·안전코드가 양쪽에서 동일 |
-| M2 | net.js: §6.5·§7 핸드셰이크 | 두 프로필이 같은 방에서 `secure` 도달, 한쪽 idPub을 임의 변조한 테스트에서 E02 발생 |
-| M3 | 메시징: §6.6 + 채팅 UI + 히스토리 | 양방향 송수신, ✓→✓✓ 전환, 새로고침 후 히스토리 유지, seq 리플레이(같은 msg 재전송) 시 무시됨 |
-| M4 | 안전코드 화면, 오류 처리 전체(§11), 미지원 브라우저 가드 | §13 체크리스트 전 항목 통과 |
-| M5 | README 작성, GitHub Pages 활성화 안내 | README에 배포·사용법 기재 |
+| M1 | crypto.js(§6.2·6.3·6.6) + store.js + 온보딩·친구 추가 UI | 두 브라우저 프로필에서 각각 신원 생성 → 코드 상호 등록 성공, 새로고침 후에도 신원·연락처 유지, 안전코드가 양쪽에서 동일 |
+| M2 | net.js + §6.4~6.5: 발행·구독·unwrap·중복 제거·ack | 두 프로필 간 양방향 송수신 성공, **한쪽을 완전히 닫은 상태에서 보낸 메시지가 다시 열면 도착**, 미등록 발신자 이벤트는 폐기됨 |
+| M3 | 채팅 UI 전체(§9.4) + 히스토리 + 상태(✓/✓✓/⚠ 재전송) + 안 읽음 배지 | ✓→✓✓ 전환, 새로고침 후 히스토리 유지, 같은 메시지 중복 수신 시 1건만 표시 |
+| M4 | 안전코드 화면, 오류 처리 전체(§11), 미지원 브라우저 가드, lastSync 커서 | §13 체크리스트 전 항목 통과 |
+| M5 | README 작성, GitHub Pages 활성화 안내 | README에 배포·사용법·한계(§2) 기재 |
 
 각 단계는 별도 커밋(메시지: `M0: …` 형식). 단계를 건너뛰거나 합치지 않는다.
 
@@ -386,36 +387,42 @@ idle → joining(room 참가 직후) → waiting(피어 없음) → handshaking(
 데스크톱 Chrome 일반 창 + 시크릿 창(또는 두 프로필)으로 수행:
 
 1. 프로필 A·B 각각 온보딩 → 코드 교환 → 상호 추가
-2. 양쪽 채팅방 진입 → 배지가 S21→S22→S23 순으로 변함
-3. A→B, B→A 각 5개 메시지 왕복, 순서·시각·✓✓ 정상
-4. B 새로고침 → A 배지 S24 → B 재진입 → 재연결 후 다시 S23, 대화 계속됨
-5. A 새로고침 후 히스토리 남아 있음
-6. 상대 코드 대신 자기 코드 입력 → E04, 깨진 문자열 → E01
-7. DevTools Network에서 relay로 나가는 payload에 평문 본문이 없음을 확인
-8. (모바일) 갤럭시 Chrome·아이폰 Safari에서 홈 화면 추가 후 1~5 재수행
+2. 둘 다 연 상태에서 A→B, B→A 각 5개 왕복: 실시간 도착, 순서·시각·✓✓ 정상
+3. **B 창을 완전히 닫음 → A가 3개 전송 → 1분 뒤 B 다시 열기 → 3개 모두 도착,
+   A의 ✓가 ✓✓로 갱신** (핵심 시나리오)
+4. A 새로고침 후 히스토리 남아 있음, 중복 표시 없음
+5. 상대 코드 대신 자기 코드 입력 → E04, 깨진 문자열 → E01
+6. 비행기 모드(또는 DevTools offline)에서 전송 → E07·⚠ 표시 → 온라인 복귀 후
+   탭하여 재전송 성공
+7. DevTools Network(WS 프레임)에서 릴레이로 나가는 이벤트가 kind 1059뿐이고
+   평문 본문이 없음을 확인
+8. (모바일) 갤럭시 Chrome·아이폰 Safari에서 홈 화면 추가 후 1~4 재수행,
+   특히 3번(비동기 도착)을 폰을 잠근 상태로 재현
 
 ## 14. 모호성 해결 규칙 (Sonnet 필독)
 
 - **규칙 A**: 이 문서가 침묵하는 결정이 나오면, 임의로 정하지 말고 **작업을
   멈추고 사용자에게 질문**한다. 단, 아래 기본값 표에 있는 것은 질문 없이 표를 따른다.
-- **규칙 B**: 이 문서와 외부 자료(라이브러리 문서 등)가 충돌하면, 보안 사양(§6)은
-  이 문서가 이기고, 라이브러리 API 시그니처는 실제 라이브러리가 이긴다.
-  후자의 경우 달라진 점을 커밋 메시지에 기록한다.
+- **규칙 B**: 이 문서와 외부 자료(라이브러리 문서 등)가 충돌하면, 프로토콜·보안
+  사양(§6·§7)은 이 문서가 이기고, 라이브러리 API 시그니처·export 이름은 실제
+  벤더링된 라이브러리가 이긴다. 후자의 경우 달라진 점을 커밋 메시지에 기록한다.
 - **규칙 C**: "더 좋아 보이는" 기능·리팩터링·의존성 추가 금지. 비목표(§1.1)는
   요청받아도 이 브랜치에서 구현하지 않는다.
 
-기본값 표: 타임스탬프 = `Date.now()` 밀리초 / 시각 표시 = 기기 로컬 24시간제
-HH:MM / 이름 최대 20자 / 메시지 최대 2000자(초과 시 전송 버튼 비활성) /
-토스트 3000ms / 정렬·비교 = 코드포인트 기준 `<`.
+기본값 표: 타임스탬프 = `Date.now()` 밀리초(단, `lastSync`와 Nostr 이벤트의
+`created_at`은 초) / 시각 표시 = 기기 로컬 24시간제 HH:MM / 이름 최대 20자 /
+메시지 최대 2000자(초과 시 전송 버튼 비활성) / 토스트 3000ms / 문자열
+정렬·비교 = 코드포인트 기준 `<` / 재연결 시도 간격 30초.
 
 ## 15. 금지사항 (위반 = 실패)
 
 1. 자체 서버·서버리스 함수·DB·푸시 서비스·애널리틱스 등 **어떤 백엔드도 추가 금지**
-2. 런타임 CDN/외부 URL 로드 금지 (Trystero가 접속하는 기본 릴레이·STUN 제외)
-3. §6 암호화 알고리즘·파라미터·도메인 문자열(`mildam-…-v1`) 변경 금지
+2. 런타임 CDN/외부 URL 로드 금지 (§7.1의 릴레이 WebSocket 4곳 제외)
+3. §6·§7의 프로토콜 규격(NIP-17/44/59, 페이로드 스키마, 도메인 문자열,
+   릴레이 목록) 변경 금지. 자체 암호 구현 금지, 평문 이벤트 발행 금지
 4. 프레임워크·번들러·npm 의존성·TypeScript 도입 금지
-5. 개인키를 extractable로 만들거나 어떤 형태로든 export·전송·로그 금지
-6. `Math.random` 사용 금지, IV 재사용 금지
+5. 개인키를 화면 표시·export·전송·로그 어떤 형태로도 노출 금지
+6. `Math.random` 사용 금지
 7. 문자열 표(§9.7)·오류 문구(§11) 임의 수정 금지
 8. TODO/스텁/주석 처리된 미완성 코드로 단계 완료 선언 금지
 9. 이 브랜치 외 다른 브랜치에 푸시 금지
