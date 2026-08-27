@@ -3,11 +3,11 @@
 import {
   getIdentity, saveIdentity, getAllContacts, addContact, contactExists, getContact,
   getSession, saveSession, addMessage, hasMessage, updateMessageStatus,
-  getLastSync, setLastSync, hasSeenWrap, markSeenWrap,
+  getMessagesByContact, getLastSync, setLastSync, hasSeenWrap, markSeenWrap,
 } from "./store.js";
 import {
   generateIdentity, encodeInviteCode, parseInviteCode, verifyInviteSignature,
-  buildOutgoingWrap, unwrapIncoming, decryptPayload,
+  buildOutgoingWrap, unwrapIncoming, decryptPayload, computeSafetyCode, formatSafetyCode,
 } from "./crypto.js";
 import { createManager } from "./pfs.js";
 import * as net from "./net.js";
@@ -31,6 +31,8 @@ const VIEWS = [
 ];
 
 let identity = null;
+let currentChatPk = null; // 지금 열려 있는 채팅방 상대(없으면 null)
+const unreadCounts = new Map(); // pk -> 안 읽은 수신 메시지 수(메모리 전용 UI 상태)
 
 export function showView(id) {
   for (const v of VIEWS) {
@@ -95,15 +97,149 @@ async function renderContactsList() {
   listEl.textContent = "";
   emptyEl.hidden = contacts.length > 0;
   for (const c of contacts) {
+    const messages = await getMessagesByContact(c.pk);
+    const last = messages[messages.length - 1];
+    const unread = unreadCounts.get(c.pk) || 0;
+
     const li = document.createElement("li");
     li.className = "contact-item";
     li.dataset.pk = c.pk;
+    li.addEventListener("click", () => openChat(c));
+
     const name = document.createElement("div");
     name.className = "contact-name";
     name.textContent = c.name;
     li.appendChild(name);
+
+    if (last) {
+      const preview = document.createElement("div");
+      preview.className = "contact-preview";
+      preview.textContent = last.body;
+      li.appendChild(preview);
+    }
+
+    if (unread > 0) {
+      const badge = document.createElement("span");
+      badge.className = "unread-badge";
+      badge.textContent = String(unread);
+      li.appendChild(badge);
+    }
+
     listEl.appendChild(li);
   }
+}
+
+async function refreshContactsListIfVisible() {
+  const view = document.getElementById("view-contacts");
+  if (view && !view.hidden) await renderContactsList();
+}
+
+// ---------------------------------------------------------------- 채팅방
+
+function formatTime(ts) {
+  const d = new Date(ts);
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+
+function statusGlyph(msg) {
+  if (msg.dir !== "out") return null;
+  if (msg.status === "sent") return { text: "✓", failed: false };
+  if (msg.status === "delivered") return { text: "✓✓", failed: false };
+  if (msg.status === "failed") return { text: "⚠", failed: true };
+  return null;
+}
+
+async function renderChatMessages(pk) {
+  const container = document.getElementById("chat-messages");
+  const messages = await getMessagesByContact(pk);
+  container.textContent = "";
+  for (const msg of messages) {
+    const row = document.createElement("div");
+    row.className = "bubble-row " + (msg.dir === "out" ? "out" : "in");
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = msg.body;
+    row.appendChild(bubble);
+
+    const meta = document.createElement("div");
+    meta.className = "bubble-meta";
+    const glyph = statusGlyph(msg);
+    meta.textContent = formatTime(msg.ts) + (glyph ? " " + glyph.text : "");
+    if (glyph && glyph.failed) {
+      meta.classList.add("failed");
+      meta.addEventListener("click", () => resendMessage(msg));
+    }
+    row.appendChild(meta);
+
+    container.appendChild(row);
+  }
+  container.scrollTop = container.scrollHeight;
+}
+
+async function refreshChatIfOpen(pk) {
+  if (currentChatPk === pk) await renderChatMessages(pk);
+}
+
+async function openChat(contact) {
+  currentChatPk = contact.pk;
+  unreadCounts.set(contact.pk, 0);
+  document.getElementById("chat-title").textContent = contact.name;
+  document.getElementById("chat-input").value = "";
+  showView("view-chat");
+  updateConnectionBadges(net.getState());
+  await renderChatMessages(contact.pk);
+}
+
+async function closeChat() {
+  currentChatPk = null;
+  showView("view-contacts");
+  await renderContactsList();
+}
+
+async function handleChatSend(event) {
+  event.preventDefault();
+  const input = document.getElementById("chat-input");
+  const sendBtn = document.getElementById("chat-send");
+  const body = input.value.trim();
+  if (!body || !currentChatPk) return;
+
+  const contact = await getContact(currentChatPk);
+  if (!contact) return;
+
+  input.value = "";
+  sendBtn.disabled = true;
+  try {
+    await sendText(contact, body);
+  } finally {
+    sendBtn.disabled = net.getState() !== "online";
+  }
+  await renderChatMessages(currentChatPk);
+}
+
+async function resendMessage(msg) {
+  const contact = await getContact(msg.pk);
+  if (!contact) return;
+  const mgr = (await getSession(contact.pk)) || createManager(identity.pk, contact.pk);
+  const payload = { v: 3, kind: "text", id: msg.id, body: msg.body, ts: msg.ts };
+  const wrapped = await buildOutgoingWrap(identity, contact, mgr, te.encode(JSON.stringify(payload)));
+  await saveSession(contact.pk, mgr);
+  const result = await net.publishWrap(wrapped);
+  await updateMessageStatus(msg.id, result.ok ? "sent" : "failed");
+  if (!result.ok) toast("전송에 실패했습니다. 네트워크 확인 후 메시지를 탭해 다시 보내세요.");
+  await refreshChatIfOpen(msg.pk);
+}
+
+// ---------------------------------------------------------------- 안전코드
+
+async function openSafetyView() {
+  if (!currentChatPk) return;
+  const contact = await getContact(currentChatPk);
+  if (!contact) return;
+  document.getElementById("safety-name").textContent = contact.name;
+  const hex = await computeSafetyCode(identity.pk, contact.pk);
+  document.getElementById("safety-code").textContent = formatSafetyCode(hex);
+  showView("view-safety");
 }
 
 // ---------------------------------------------------------------- 온보딩
@@ -198,6 +334,8 @@ function updateConnectionBadges(state) {
     el.textContent = text;
     el.className = "badge" + (cls ? " " + cls : "");
   }
+  const sendBtn = document.getElementById("chat-send");
+  if (sendBtn) sendBtn.disabled = state !== "online";
 }
 
 // ---------------------------------------------------------------- 발신·수신 파이프라인 (§6.6, §7)
@@ -269,8 +407,15 @@ async function handleIncomingWrap(rawEvent) {
     } catch (err) {
       console.warn("mildam: failed to send ack", err);
     }
+    if (currentChatPk === rumor.pubkey) {
+      await refreshChatIfOpen(rumor.pubkey);
+    } else {
+      unreadCounts.set(rumor.pubkey, (unreadCounts.get(rumor.pubkey) || 0) + 1);
+    }
+    await refreshContactsListIfVisible();
   } else if (payload.kind === "ack") {
     await updateMessageStatus(payload.ref, "delivered");
+    await refreshChatIfOpen(rumor.pubkey);
   }
   // 그 외 kind는 §6.5에 따라 조용히 폐기(위 분기에 해당하지 않으면 아무 것도 하지 않음)
 }
@@ -313,6 +458,19 @@ function wireEvents() {
   });
   document.getElementById("add-submit").addEventListener("click", () => {
     handleAddSubmit();
+  });
+
+  document.getElementById("chat-back").addEventListener("click", () => {
+    closeChat();
+  });
+  document.getElementById("chat-form").addEventListener("submit", (event) => {
+    handleChatSend(event);
+  });
+  document.getElementById("chat-safety").addEventListener("click", () => {
+    openSafetyView();
+  });
+  document.getElementById("safety-back").addEventListener("click", () => {
+    showView("view-chat");
   });
 }
 
