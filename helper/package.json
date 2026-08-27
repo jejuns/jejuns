@@ -1,0 +1,15 @@
+{
+  "name": "mildam-helper",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "밀담 도우미 데몬 (PLAN.md §16) — 암호문 감지 시 내용 없는 푸시 발송, 30일 재발행",
+  "main": "helper.mjs",
+  "scripts": {
+    "start": "node helper.mjs"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.25.0",
+    "web-push": "^3.6.7"
+  }
+}
