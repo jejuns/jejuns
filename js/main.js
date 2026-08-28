@@ -2,7 +2,7 @@
 
 import {
   getIdentity, saveIdentity, getAllContacts, addContact, contactExists, getContact,
-  getSession, saveSession, addMessage, hasMessage, updateMessageStatus,
+  getSession, saveSession, addMessage, hasMessageFrom, updateMessageStatusFrom,
   getMessagesByContact, getLastSync, setLastSync, hasSeenWrap, markSeenWrap,
   pruneSeenWraps, getHelper, saveHelper,
 } from "./store.js";
@@ -257,7 +257,7 @@ async function resendMessageLocked(msg) {
   const wrapped = await buildOutgoingWrap(identity, contact, mgr, te.encode(JSON.stringify(payload)));
   await saveSession(contact.pk, mgr);
   const result = await net.publishWrap(wrapped);
-  await updateMessageStatus(msg.id, result.ok ? "sent" : "failed");
+  await updateMessageStatusFrom(msg.pk, msg.id, result.ok ? "sent" : "failed", "out");
   if (!result.ok) toast(ERRORS.E07);
   await refreshChatIfOpen(msg.pk);
 }
@@ -518,7 +518,7 @@ async function handleIncomingWrap(rawEvent) {
   }
 
   if (payload.kind === "text") {
-    if (await hasMessage(payload.id)) return; // §6.5: id 중복은 조용히 폐기
+    if (await hasMessageFrom(rumor.pubkey, payload.id)) return; // §6.5: id 중복은 조용히 폐기
     await addMessage({
       id: payload.id, pk: rumor.pubkey, dir: "in", body: payload.body,
       ts: payload.ts, status: "received",
@@ -540,7 +540,9 @@ async function handleIncomingWrap(rawEvent) {
     }
     await refreshContactsListIfVisible();
   } else if (payload.kind === "ack") {
-    await updateMessageStatus(payload.ref, "delivered");
+    // v4 §S2(F-05): 이 상대(rumor.pubkey)와의 대화에서 내가 보낸(out) 메시지만
+    // delivered로 바꿀 수 있다 — 다른 대화의 메시지 id로는 조회조차 안 된다.
+    await updateMessageStatusFrom(rumor.pubkey, payload.ref, "delivered", "out");
     await refreshChatIfOpen(rumor.pubkey);
   }
   // 그 외 kind는 §6.5에 따라 조용히 폐기(위 분기에 해당하지 않으면 아무 것도 하지 않음)

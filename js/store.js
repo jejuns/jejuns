@@ -1,7 +1,7 @@
 // store.js — IndexedDB 접근 계층 (PLAN.md §8). DOM을 만지지 않는다.
 
 const DB_NAME = "mildam";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const SEEN_WRAP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 let dbPromise = null;
@@ -10,8 +10,9 @@ function openDB() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (event) => {
       const db = req.result;
+      const oldVersion = event.oldVersion;
       if (!db.objectStoreNames.contains("meta")) {
         db.createObjectStore("meta", { keyPath: "k" });
       }
@@ -21,13 +22,36 @@ function openDB() {
       if (!db.objectStoreNames.contains("sessions")) {
         db.createObjectStore("sessions", { keyPath: "pk" });
       }
+      // v4 §S2(F-05): messages의 keyPath를 "id"(전역) -> ["pk","id"](대화별)로
+      // 바꾼다. 신규 설치와 기존(v1~v3) DB 업그레이드를 분리해서 처리한다 —
+      // 뭉치면 안 된다(v1.1 P-3).
       if (!db.objectStoreNames.contains("messages")) {
-        const messages = db.createObjectStore("messages", { keyPath: "id" });
-        messages.createIndex("byContact", ["pk", "ts"]);
+        // 신규 설치(oldVersion === 0)이거나 이 스토어가 아예 없던 경우 —
+        // 처음부터 새 keyPath로 만든다. 마이그레이션 불필요.
+        const store = db.createObjectStore("messages", { keyPath: ["pk", "id"] });
+        store.createIndex("byContact", ["pk", "ts"]);
+      } else if (oldVersion < 4) {
+        // 기존 DB(v1~v3)에 keyPath:"id"인 messages가 이미 있음 — 데이터를
+        // 보존한 채 keyPath를 ["pk","id"]로 교체한다. versionchange
+        // 트랜잭션 안에서 읽기->삭제->재생성->복원을 순서대로 수행한다.
+        const getAllReq = req.transaction.objectStore("messages").getAll();
+        getAllReq.onsuccess = () => {
+          const rows = getAllReq.result;
+          db.deleteObjectStore("messages");
+          const store = db.createObjectStore("messages", { keyPath: ["pk", "id"] });
+          store.createIndex("byContact", ["pk", "ts"]);
+          for (const row of rows) {
+            if (row && typeof row.pk === "string" && typeof row.id === "string") store.add(row);
+          }
+        };
       }
       if (!db.objectStoreNames.contains("seenWraps")) {
         const seen = db.createObjectStore("seenWraps", { keyPath: "id" });
         seen.createIndex("byAt", "at");
+      }
+      // v4 §S6-b(F-14): 완전히 새 스토어라 분기 없이 만들면 된다.
+      if (!db.objectStoreNames.contains("gaps")) {
+        db.createObjectStore("gaps", { keyPath: "pk" });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -123,17 +147,23 @@ export async function addMessage(msg) {
   return tx("messages", "readwrite", (s) => reqToPromise(s.add(msg)));
 }
 
-export async function hasMessage(id) {
-  const row = await tx("messages", "readonly", (s) => reqToPromise(s.get(id)));
+// v4 §S2(F-05): 메시지는 이제 [pk,id] 복합키로만 조회한다 — 상대(pk)를
+// 명시해야 접근할 수 있으므로 다른 대화의 메시지 id로는 조회 자체가 안 된다.
+export async function hasMessageFrom(pk, id) {
+  const row = await tx("messages", "readonly", (s) => reqToPromise(s.get([pk, id])));
   return !!row;
 }
 
-export async function updateMessageStatus(id, status) {
+// dir 검증까지 수행한다 — 상대는 자기 대화의 '내가 보낸(out)' 메시지 상태만
+// 바꿀 수 있고, requireDir이 일치하지 않으면 조용히 실패(false)한다.
+export async function updateMessageStatusFrom(pk, id, status, requireDir) {
   return tx("messages", "readwrite", async (s) => {
-    const row = await reqToPromise(s.get(id));
-    if (!row) return;
+    const row = await reqToPromise(s.get([pk, id]));
+    if (!row) return false;
+    if (requireDir && row.dir !== requireDir) return false;
     row.status = status;
     await reqToPromise(s.put(row));
+    return true;
   });
 }
 
