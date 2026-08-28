@@ -249,7 +249,7 @@ async function handleChatSend(event) {
 // v4 §S3(F-09): net.publishWrap은 세션 락 밖에서만 부른다 — 락 안에서는 봉투를
 // 만들고 상태를 pending으로만 남긴다. 발행·최종 상태 갱신은 락을 나온 뒤.
 async function resendMessage(msg) {
-  const built = await enqueueSessionOp(() => resendMessageBuildLocked(msg));
+  const built = await withSessionLock(msg.pk, () => resendMessageBuildLocked(msg));
   if (!built) return;
   await refreshChatIfOpen(msg.pk);
   const result = await net.publishWrap(built.wrapped);
@@ -442,11 +442,22 @@ function updateConnectionBadges(state) {
 // (PLAN.md §8.2). 같은 상대에 대해 이 사이클이 두 개 이상 겹쳐 실행되면
 // 나중에 끝난 저장이 앞선 저장을 덮어써 래칫 상태를 잃는다 — 내가 상대에게
 // 보내는 메시지, 상대의 메시지에 대한 자동 ack, 수신 처리 자체가 모두
-// 같은 세션을 건드리므로 이 셋을 하나의 전역 큐로 완전히 직렬화한다.
-let opQueue = Promise.resolve();
-function enqueueSessionOp(taskFn) {
-  const result = opQueue.then(taskFn, taskFn);
-  opQueue = result.then(() => {}, () => {}); // 큐 자체는 항상 계속 진행되어야 함
+// 같은 세션을 건드리므로 상대(pk)별로 직렬화한다.
+//
+// v4 §S5(F-03): 이전에는 모듈 스코프 프로미스 체인 하나로 직렬화했는데, 이건
+// 문서(탭) 하나 안에서만 유효하다. 같은 앱이 두 컨텍스트(설치된 PWA + 브라우저
+// 탭 등)에서 동시에 열리면 각자 독립된 큐와 독립된 IndexedDB 연결을 가지므로
+// 서로의 래칫 전진을 덮어쓸 수 있다. Web Locks(navigator.locks)는 탭 경계를
+// 넘어 오리진 전체에서 상호배제를 보장하므로 이 문제를 근본적으로 막는다.
+// 미지원 브라우저를 위해 상대별 프로미스 체인 폴백을 둔다.
+const legacyQueues = new Map();
+function withSessionLock(pk, taskFn) {
+  if (navigator.locks && navigator.locks.request) {
+    return navigator.locks.request("mildam-session-" + pk, taskFn);
+  }
+  const prev = legacyQueues.get(pk) || Promise.resolve();
+  const result = prev.then(taskFn, taskFn);
+  legacyQueues.set(pk, result.then(() => {}, () => {}));
   return result;
 }
 
@@ -454,7 +465,7 @@ function enqueueSessionOp(taskFn) {
 // 세션 락 밖에서만 부른다 — 락 안에서는 봉투를 만들고 상태를 pending으로
 // 저장할 뿐이다. 발행·최종 상태 갱신은 락을 나온 뒤에 한다.
 export async function sendText(contact, body) {
-  const built = await enqueueSessionOp(() => sendTextBuildLocked(contact, body));
+  const built = await withSessionLock(contact.pk, () => sendTextBuildLocked(contact, body));
   await refreshChatIfOpen(contact.pk);
   await refreshContactsListIfVisible();
   const result = await net.publishWrap(built.wrapped);
@@ -497,9 +508,8 @@ async function handleIncomingWrap(rawEvent) {
     return;
   }
 
-  // ---- 단계 2: 상대 pk로 세션 락 안에서 수행 (지금은 enqueueSessionOp —
-  // S5에서 withSessionLock(rumor.pubkey, ...)으로 교체된다) ----
-  const locked = await enqueueSessionOp(() => handleIncomingWrapLocked(rawEvent, rumor, contact));
+  // ---- 단계 2: 상대(rumor.pubkey) pk로 세션 락 안에서 수행 ----
+  const locked = await withSessionLock(rumor.pubkey, () => handleIncomingWrapLocked(rawEvent, rumor, contact));
   if (!locked) return; // 단계 2에서 조용히 폐기됨(markSeenWrap도 이미 처리됨)
 
   // ---- 단계 3: 락 없음 ----
