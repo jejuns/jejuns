@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import webpush from "web-push";
-import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import { SimplePool } from "nostr-tools/pool";
 import { wrapEvent, unwrapEvent } from "nostr-tools/nip17";
 import { GiftWrap } from "nostr-tools/kinds";
@@ -131,12 +131,18 @@ async function main() {
 
   const pool = new SimplePool();
 
+  // v4 §S8-d: 맥 릴레이는 REQ 전에 NIP-42 인증을 요구한다. AbstractRelay.auth()가
+  // 서명 안 된 kind 22242 템플릿을 넘겨주고 서명된 이벤트를 돌려받는다(실물
+  // 계약 확인 완료). 도우미 pk도 릴레이 config.json의 allowedPubkeys에 있어야 한다.
+  const onauth = (authEventTemplate) => finalizeEvent(authEventTemplate, identity.sk);
+
   // §16.3: 사용자→도우미 등록 DM(kind 1059, content는 §16.3의 pushsub 페이로드)을
   // 계속 구독한다. NIP-17만 쓰고 pfs 봉투는 없다(도우미가 직접 읽어야 하므로).
   pool.subscribe(
     RELAYS,
     { kinds: [GiftWrap], "#p": [identity.pk] },
     {
+      onauth,
       onevent(wrap) {
         let rumor;
         try {
@@ -169,6 +175,7 @@ async function main() {
       RELAYS,
       { kinds: [GiftWrap], "#p": pks },
       {
+        onauth,
         onevent(event) {
           handleWatchedEvent(event).catch((err) =>
             console.warn("이벤트 처리 중 오류:", err)

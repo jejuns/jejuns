@@ -4,18 +4,19 @@
 // 들어오는 kind 1059 이벤트를 콜백으로 넘길 뿐이다.
 
 import { SimplePool, GiftWrap } from "../vendor/nostr-tools.js";
+import { RELAYS } from "./config.js";
 
-export const RELAYS = [
-  "wss://relay.damus.io",
-  "wss://nos.lol",
-  "wss://relay.primal.net",
-  "wss://offchain.pub",
-];
+// v4 §S8-b: 릴레이 종단은 js/config.js 한 곳에서만 정한다(tools/set-relay.mjs가
+// index.html의 CSP와 함께 갱신). 기존 import 경로를 유지하기 위해 re-export 한다.
+export { RELAYS };
 
 const RECONNECT_INTERVAL_MS = 30000;
 
 let pool = null;
 let state = "connecting";
+// v4 §S8-d(P-1): 맥 릴레이는 REQ 전에 NIP-42 인증을 요구한다. 서명자는 main.js가
+// 신원을 확보한 뒤 주입한다. 발행(EVENT)에는 인증이 필요 없으므로 구독에만 쓴다.
+let authSigner = null;
 const stateListeners = new Set();
 let currentCloser = null;
 let currentArgs = null; // { pk, sinceSeconds, onEvent } — 재연결 시 재사용
@@ -50,6 +51,10 @@ function recomputeState() {
   setState(anyConnected ? "online" : "offline");
 }
 
+export function setAuthSigner(fn) {
+  authSigner = fn;
+}
+
 export function getState() {
   return state;
 }
@@ -66,6 +71,7 @@ function openSubscription({ pk, sinceSeconds, onEvent }) {
     RELAYS,
     { kinds: [GiftWrap], "#p": [pk], since: sinceSeconds },
     {
+      onauth: authSigner,
       onevent(event) {
         onEvent(event);
       },

@@ -9,7 +9,7 @@ import {
 import {
   generateIdentity, encodeInviteCode, parseInviteCode, verifyInviteSignature,
   buildOutgoingWrap, unwrapIncoming, decryptPayload, computeSafetyCode, formatSafetyCode,
-  parseHelperCode, buildHelperRegistrationWrap,
+  parseHelperCode, buildHelperRegistrationWrap, buildAuthSigner,
 } from "./crypto.js";
 import { createManager } from "./pfs.js";
 import * as net from "./net.js";
@@ -711,6 +711,9 @@ async function handleIncomingWrapLocked(rawEvent, rumor, contact) {
 }
 
 async function startMessaging() {
+  // v4 §S8-d: 구독 전에 인증 서명자를 주입한다 — 맥 릴레이는 인증 없는 REQ를
+  // 거부하므로, 이게 없으면 아무 메시지도 받지 못한다.
+  net.setAuthSigner(buildAuthSigner(identity));
   net.onStateChange(updateConnectionBadges);
   const lastSync = await getLastSync();
   const since = Math.max(0, lastSync - 172800); // PLAN.md §7.2: gift wrap 시각 무작위화 폭(2일)

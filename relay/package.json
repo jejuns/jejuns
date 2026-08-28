@@ -1,0 +1,14 @@
+{
+  "name": "mildam-relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "밀담 전용 최소 Nostr 릴레이 (맥에서 실행, 앱 코드는 서빙하지 않음)",
+  "scripts": {
+    "start": "node relay.mjs"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.25.0",
+    "ws": "^8.18.0"
+  }
+}

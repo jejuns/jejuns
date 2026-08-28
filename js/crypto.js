@@ -3,6 +3,7 @@
 
 import {
   generateSecretKey, getPublicKey, schnorr, getConversationKey, wrapEvent, unwrapEvent,
+  finalizeEvent,
 } from "../vendor/nostr-tools.js";
 import {
   createRatchetPrekey, deriveRootSecret, makeAd, managerEncrypt, managerDecrypt,
@@ -179,4 +180,16 @@ export async function decryptPayload(identity, mgr, rumor) {
   );
   const payload = JSON.parse(td.decode(pt));
   return { payload, senderPk };
+}
+
+// ---------------------------------------------------------------- §S8-d NIP-42 인증
+// nostr-tools 2.25.0 실물 계약(규칙 B로 확인함):
+//   AbstractRelay.auth(signAuthEvent) 가 signAuthEvent(makeAuthEvent(url, challenge))
+//   를 호출한다. 인자는 서명 안 된 템플릿
+//   { kind: 22242, created_at, tags: [["relay", url], ["challenge", ...]], content: "" }
+//   이고, 반환값은 id·sig가 채워진 서명된 이벤트여야 한다(라이브러리가 evt.id로
+//   릴레이의 OK 응답을 기다리기 때문). 즉 계획서가 추정한 형태
+//   (authEvent) => finalizeEvent(authEvent, sk) 가 실물과 일치했다.
+export function buildAuthSigner(identity) {
+  return (authEventTemplate) => finalizeEvent(authEventTemplate, identity.sk);
 }
