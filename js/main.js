@@ -169,6 +169,7 @@ function formatTime(ts) {
 
 function statusGlyph(msg) {
   if (msg.dir !== "out") return null;
+  if (msg.status === "pending") return { text: "⋯", failed: false };
   if (msg.status === "sent") return { text: "✓", failed: false };
   if (msg.status === "delivered") return { text: "✓✓", failed: false };
   if (msg.status === "failed") return { text: "⚠", failed: true };
@@ -245,21 +246,27 @@ async function handleChatSend(event) {
   await renderChatMessages(currentChatPk);
 }
 
-function resendMessage(msg) {
-  return enqueueSessionOp(() => resendMessageLocked(msg));
+// v4 §S3(F-09): net.publishWrap은 세션 락 밖에서만 부른다 — 락 안에서는 봉투를
+// 만들고 상태를 pending으로만 남긴다. 발행·최종 상태 갱신은 락을 나온 뒤.
+async function resendMessage(msg) {
+  const built = await enqueueSessionOp(() => resendMessageBuildLocked(msg));
+  if (!built) return;
+  await refreshChatIfOpen(msg.pk);
+  const result = await net.publishWrap(built.wrapped);
+  await updateMessageStatusFrom(msg.pk, msg.id, result.ok ? "sent" : "failed", "out");
+  if (!result.ok) toast(ERRORS.E07);
+  await refreshChatIfOpen(msg.pk);
 }
 
-async function resendMessageLocked(msg) {
+async function resendMessageBuildLocked(msg) {
   const contact = await getContact(msg.pk);
-  if (!contact) return;
+  if (!contact) return null;
   const mgr = (await getSession(contact.pk)) || createManager(identity.pk, contact.pk);
   const payload = { v: 3, kind: "text", id: msg.id, body: msg.body, ts: msg.ts };
   const wrapped = await buildOutgoingWrap(identity, contact, mgr, te.encode(JSON.stringify(payload)));
   await saveSession(contact.pk, mgr);
-  const result = await net.publishWrap(wrapped);
-  await updateMessageStatusFrom(msg.pk, msg.id, result.ok ? "sent" : "failed", "out");
-  if (!result.ok) toast(ERRORS.E07);
-  await refreshChatIfOpen(msg.pk);
+  await updateMessageStatusFrom(msg.pk, msg.id, "pending", "out");
+  return { wrapped };
 }
 
 // ---------------------------------------------------------------- 안전코드
@@ -443,44 +450,83 @@ function enqueueSessionOp(taskFn) {
   return result;
 }
 
-// 새 메시지를 상대에게 암호화해 발행한다. 성공 여부와 무관하게 로컬에는
-// 즉시 저장한다(상태만 sent/failed로 갈린다 — PLAN.md §8.1).
-export function sendText(contact, body) {
-  return enqueueSessionOp(() => sendTextLocked(contact, body));
+// 새 메시지를 상대에게 암호화해 발행한다. v4 §S3(F-09): net.publishWrap은
+// 세션 락 밖에서만 부른다 — 락 안에서는 봉투를 만들고 상태를 pending으로
+// 저장할 뿐이다. 발행·최종 상태 갱신은 락을 나온 뒤에 한다.
+export async function sendText(contact, body) {
+  const built = await enqueueSessionOp(() => sendTextBuildLocked(contact, body));
+  await refreshChatIfOpen(contact.pk);
+  await refreshContactsListIfVisible();
+  const result = await net.publishWrap(built.wrapped);
+  await updateMessageStatusFrom(contact.pk, built.payloadId, result.ok ? "sent" : "failed", "out");
+  await refreshChatIfOpen(contact.pk);
+  return { id: built.payloadId, ok: result.ok };
 }
 
-async function sendTextLocked(contact, body) {
+async function sendTextBuildLocked(contact, body) {
   const mgr = (await getSession(contact.pk)) || createManager(identity.pk, contact.pk);
   const payload = { v: 3, kind: "text", id: crypto.randomUUID(), body, ts: Date.now() };
   const wrapped = await buildOutgoingWrap(identity, contact, mgr, te.encode(JSON.stringify(payload)));
   await saveSession(contact.pk, mgr);
-  const result = await net.publishWrap(wrapped);
-  await addMessage({
-    id: payload.id, pk: contact.pk, dir: "out", body, ts: payload.ts,
-    status: result.ok ? "sent" : "failed",
-  });
-  return { id: payload.id, ok: result.ok };
+  await addMessage({ id: payload.id, pk: contact.pk, dir: "out", body, ts: payload.ts, status: "pending" });
+  return { wrapped, payloadId: payload.id };
 }
 
-// PLAN.md §7.3 수신 게이트를 순서대로 통과시킨다: ① 중복 wrap ② unwrap 실패
-// ③ 미등록 발신자 ④ §6.6 파이프라인. ①~③은 조용히 폐기(콘솔 경고만).
+// v4 §S3(F-07,F-08,F-09) 수신 게이트. 3단계 구조를 반드시 지킨다:
+// 단계 1(락 없음, 확정적 폐기만 처리) -> 단계 2(상대 pk 세션 락 안에서 복호·
+// 검증·저장) -> 단계 3(락 없음, ack 발행·UI 갱신). markSeenWrap은 "확정적으로
+// 버림이 결정된 시점"과 "저장이 끝난 뒤"에만 부른다 — 그 사이에 예기치 못한
+// 예외가 나면 다음 재생 때 다시 처리되도록 markSeenWrap을 부르지 않는다.
 async function handleIncomingWrap(rawEvent) {
+  // ---- 단계 1: 락 없음 ----
   if (await hasSeenWrap(rawEvent.id)) return;
-  await markSeenWrap(rawEvent.id);
 
   let rumor;
   try {
     rumor = unwrapIncoming(identity, rawEvent);
   } catch (err) {
     console.warn("mildam: gift wrap unwrap failed, discarding", err);
+    await markSeenWrap(rawEvent.id);
     return;
   }
 
   const contact = await getContact(rumor.pubkey);
   if (!contact) {
     console.warn("mildam: wrap from a sender not in contacts, discarding");
+    await markSeenWrap(rawEvent.id);
     return;
   }
+
+  // ---- 단계 2: 상대 pk로 세션 락 안에서 수행 (지금은 enqueueSessionOp —
+  // S5에서 withSessionLock(rumor.pubkey, ...)으로 교체된다) ----
+  const locked = await enqueueSessionOp(() => handleIncomingWrapLocked(rawEvent, rumor, contact));
+  if (!locked) return; // 단계 2에서 조용히 폐기됨(markSeenWrap도 이미 처리됨)
+
+  // ---- 단계 3: 락 없음 ----
+  if (locked.ackWrapped) {
+    try {
+      await net.publishWrap(locked.ackWrapped);
+    } catch (err) {
+      console.warn("mildam: failed to send ack", err);
+    }
+  }
+  if (locked.kind === "text") {
+    if (currentChatPk === rumor.pubkey) {
+      await refreshChatIfOpen(rumor.pubkey);
+    } else if (!locked.wasDuplicate) {
+      unreadCounts.set(rumor.pubkey, (unreadCounts.get(rumor.pubkey) || 0) + 1);
+    }
+    await refreshContactsListIfVisible();
+  } else if (locked.kind === "ack") {
+    await refreshChatIfOpen(rumor.pubkey);
+  }
+}
+
+// 단계 2 본문. 반환값이 null이면 확정적으로 폐기된 것이고(markSeenWrap도 이미
+// 끝났음), 단계 3은 아무 일도 하지 않는다.
+async function handleIncomingWrapLocked(rawEvent, rumor, contact) {
+  // 락을 얻기까지 대기하는 동안 같은 이벤트가 먼저 들어와 처리됐을 수 있다.
+  if (await hasSeenWrap(rawEvent.id)) return null;
 
   const mgr = (await getSession(rumor.pubkey)) || createManager(identity.pk, rumor.pubkey);
   let decrypted;
@@ -488,7 +534,8 @@ async function handleIncomingWrap(rawEvent) {
     decrypted = await decryptPayload(identity, mgr, rumor);
   } catch (err) {
     console.warn("mildam: pfs decrypt failed, discarding", err);
-    return;
+    await markSeenWrap(rawEvent.id);
+    return null;
   }
   await saveSession(rumor.pubkey, mgr);
 
@@ -496,7 +543,10 @@ async function handleIncomingWrap(rawEvent) {
   if (rawEvent.created_at > lastSync) await setLastSync(rawEvent.created_at);
 
   const payload = decrypted.payload;
-  if (!payload || payload.v !== 3) return; // §6.5: 미지의 버전은 조용히 폐기
+  if (!payload || payload.v !== 3) { // §6.5: 미지의 버전은 조용히 폐기
+    await markSeenWrap(rawEvent.id);
+    return null;
+  }
 
   // v4 §S1(F-06): 복호에 성공했다고 해서 필드 내용까지 신뢰하지 않는다.
   if (payload.kind === "text") {
@@ -504,48 +554,53 @@ async function handleIncomingWrap(rawEvent) {
     const clampedTs = clampTs(payload.ts);
     if (!isUuidV4(payload.id) || bodyLen < 1 || bodyLen > 2000 || clampedTs === null) {
       console.warn("mildam: text payload failed validation, discarding");
-      return;
+      await markSeenWrap(rawEvent.id);
+      return null;
     }
     payload.ts = clampedTs;
     payload.body = sanitizeForDisplay(payload.body);
-  } else if (payload.kind === "ack") {
-    const clampedTs = clampTs(payload.ts);
-    if (!isUuidV4(payload.ref) || clampedTs === null) {
-      console.warn("mildam: ack payload failed validation, discarding");
-      return;
-    }
-    payload.ts = clampedTs;
-  }
 
-  if (payload.kind === "text") {
-    if (await hasMessageFrom(rumor.pubkey, payload.id)) return; // §6.5: id 중복은 조용히 폐기
-    await addMessage({
-      id: payload.id, pk: rumor.pubkey, dir: "in", body: payload.body,
-      ts: payload.ts, status: "received",
-    });
+    // v4 §S3(F-07): 중복이어도 addMessage만 건너뛰고 ack는 항상 다시 만든다 —
+    // 상대의 ack가 유실되어 같은 id로 재전송한 경우, 여기서도 ack를 안 보내면
+    // 발신 측은 영원히 delivered에 도달하지 못한다.
+    const wasDuplicate = await hasMessageFrom(rumor.pubkey, payload.id);
+    if (!wasDuplicate) {
+      await addMessage({
+        id: payload.id, pk: rumor.pubkey, dir: "in", body: payload.body,
+        ts: payload.ts, status: "received",
+      });
+    }
+    let ackWrapped = null;
     try {
       const ackPayload = { v: 3, kind: "ack", ref: payload.id, ts: Date.now() };
-      const ackWrapped = await buildOutgoingWrap(
+      ackWrapped = await buildOutgoingWrap(
         identity, contact, mgr, te.encode(JSON.stringify(ackPayload))
       );
       await saveSession(rumor.pubkey, mgr);
-      await net.publishWrap(ackWrapped);
     } catch (err) {
-      console.warn("mildam: failed to send ack", err);
+      console.warn("mildam: failed to build ack", err);
     }
-    if (currentChatPk === rumor.pubkey) {
-      await refreshChatIfOpen(rumor.pubkey);
-    } else {
-      unreadCounts.set(rumor.pubkey, (unreadCounts.get(rumor.pubkey) || 0) + 1);
+    await markSeenWrap(rawEvent.id);
+    return { kind: "text", ackWrapped, wasDuplicate };
+  }
+
+  if (payload.kind === "ack") {
+    const clampedTs = clampTs(payload.ts);
+    if (!isUuidV4(payload.ref) || clampedTs === null) {
+      console.warn("mildam: ack payload failed validation, discarding");
+      await markSeenWrap(rawEvent.id);
+      return null;
     }
-    await refreshContactsListIfVisible();
-  } else if (payload.kind === "ack") {
     // v4 §S2(F-05): 이 상대(rumor.pubkey)와의 대화에서 내가 보낸(out) 메시지만
     // delivered로 바꿀 수 있다 — 다른 대화의 메시지 id로는 조회조차 안 된다.
     await updateMessageStatusFrom(rumor.pubkey, payload.ref, "delivered", "out");
-    await refreshChatIfOpen(rumor.pubkey);
+    await markSeenWrap(rawEvent.id);
+    return { kind: "ack", ackWrapped: null };
   }
-  // 그 외 kind는 §6.5에 따라 조용히 폐기(위 분기에 해당하지 않으면 아무 것도 하지 않음)
+
+  // §6.5: 그 외 kind는 조용히 폐기
+  await markSeenWrap(rawEvent.id);
+  return null;
 }
 
 async function startMessaging() {
@@ -553,8 +608,8 @@ async function startMessaging() {
   const lastSync = await getLastSync();
   const since = Math.max(0, lastSync - 172800); // PLAN.md §7.2: gift wrap 시각 무작위화 폭(2일)
   net.startReceiving(identity.pk, since, (rawEvent) => {
-    // sendText/resendMessage와 같은 큐를 타야 세션 경합이 완전히 막힌다.
-    enqueueSessionOp(() => handleIncomingWrap(rawEvent)).catch((err) =>
+    // handleIncomingWrap은 단계 2만 내부적으로 락을 잡는다(단계 1·3은 락 밖).
+    handleIncomingWrap(rawEvent).catch((err) =>
       console.warn("mildam: incoming wrap handling threw", err)
     );
   });
