@@ -59,9 +59,13 @@ self.addEventListener("fetch", (event) => {
 // 아무것도 보내지 않으므로(내용 없는 빈 알림), 여기서 읽을 것이 없다.
 self.addEventListener("push", (event) => {
   event.waitUntil(
+    // v4 §S9: tag를 고정하고 renotify를 끄면, 탈취된 맥이 푸시를 남발해도
+    // 알림 1건으로 병합된다.
     self.registration.showNotification("밀담", {
       body: "새 메시지가 도착했습니다",
       icon: "icons/icon.svg",
+      tag: "mildam-new",
+      renotify: false,
     })
   );
 });

@@ -7,7 +7,7 @@
 //
 // 실행: node helper.mjs   (같은 폴더에 npm install 먼저)
 
-import { readFile, writeFile, appendFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,19 +22,12 @@ const STATE_DIR = path.join(__dirname, "state");
 const IDENTITY_PATH = path.join(STATE_DIR, "identity.json");
 const VAPID_PATH = path.join(STATE_DIR, "vapid.json");
 const SUBS_PATH = path.join(STATE_DIR, "subs.json");
-const ARCHIVE_PATH = path.join(STATE_DIR, "archive.jsonl");
 
-// PLAN.md §7.1: 릴레이 목록(폰 앱과 완전히 동일해야 같은 우체통을 본다)
-const RELAYS = [
-  "wss://relay.damus.io",
-  "wss://nos.lol",
-  "wss://relay.primal.net",
-  "wss://offchain.pub",
-];
+// v4 §S9: 릴레이는 맥 릴레이 하나뿐이다(config.json의 relayUrl). 공개 릴레이는
+// 더 이상 쓰지 않는다 — 금지사항 #5.
+const CONFIG_PATH = path.join(__dirname, "config.json");
 
 const PUSH_MIN_INTERVAL_MS = 120000; // §16.4: 사용자별 최소 간격 120초
-const ARCHIVE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // §16.5: 30일
-const REPUBLISH_INTERVAL_MS = 24 * 60 * 60 * 1000; // §16.5: 24시간마다
 
 function b64u(buf) {
   return Buffer.from(buf).toString("base64url");
@@ -91,32 +84,40 @@ async function saveSubs(subs) {
   await writeFile(SUBS_PATH, JSON.stringify(subs, null, 2));
 }
 
-async function loadArchive() {
-  if (!existsSync(ARCHIVE_PATH)) return [];
-  const text = await readFile(ARCHIVE_PATH, "utf8");
-  const out = [];
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      out.push(JSON.parse(line));
-    } catch {
-      // 손상된 줄은 건너뛴다
-    }
+// v4 §S9: 암호문 아카이브·재발행 기능은 전면 삭제했다. 맥 릴레이가 같은 보관
+// 역할을 하므로 완전한 중복이었고, 탈취된 맥에 메타데이터를 집적시키는 유일한
+// 요소였다(F-02).
+
+async function loadConfig() {
+  if (!existsSync(CONFIG_PATH)) {
+    console.error(
+      "helper/config.json 이 없습니다.\n" +
+      "  cp helper/config.example.json helper/config.json\n" +
+      "그런 다음 relayUrl 을 맥 릴레이 주소로 바꾸세요."
+    );
+    process.exit(1);
   }
-  return out;
-}
-async function rewriteArchive(entries) {
-  const body = entries.map((e) => JSON.stringify(e)).join("\n") + (entries.length ? "\n" : "");
-  await writeFile(ARCHIVE_PATH, body);
-}
-async function appendArchive(entry) {
-  await appendFile(ARCHIVE_PATH, JSON.stringify(entry) + "\n");
+  let cfg;
+  try {
+    cfg = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
+  } catch (err) {
+    console.error("helper/config.json 을 읽을 수 없습니다:", err.message);
+    process.exit(1);
+  }
+  if (typeof cfg.relayUrl !== "string" || !/^wss?:\/\//.test(cfg.relayUrl)) {
+    console.error("helper/config.json 의 relayUrl 이 없거나 ws(s):// 형식이 아닙니다.");
+    process.exit(1);
+  }
+  return cfg;
 }
 
 // ---------------------------------------------------------------- 메인
 
 async function main() {
-  await mkdir(STATE_DIR, { recursive: true });
+  await mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
+
+  const config = await loadConfig();
+  const RELAYS = [config.relayUrl];
 
   const identity = await loadOrCreateIdentity();
   const vapid = await loadOrCreateVapid();
@@ -125,8 +126,10 @@ async function main() {
   printHelperCode(identity.pk, vapid.publicKey);
 
   let subs = await loadSubs();
-  const archiveList = await loadArchive();
-  const archiveIndex = new Set(archiveList.map((e) => e.id));
+  // v4 §S9: 중복 푸시 방지는 인메모리 Set으로만 한다 — 재시작 시 비어도
+  // 무해하다(최악의 경우 알림 1건이 중복될 뿐이고, 디스크에 메타데이터를
+  // 남기지 않는 쪽이 훨씬 중요하다).
+  const seenEventIds = new Set();
   const lastPushAt = new Map();
 
   const pool = new SimplePool();
@@ -157,7 +160,16 @@ async function main() {
           return;
         }
         if (content?.v !== 3 || content?.kind !== "pushsub" || !content.sub) return;
-        subs[rumor.pubkey] = content.sub;
+        // v4 §S9(F-16): 등록 DM은 재생될 수 있다. 저장된 ts보다 크지 않은 ts의
+        // 등록은 무시해 옛 구독으로 되돌아가는 것을 막는다.
+        const ts = content.ts;
+        if (typeof ts !== "number" || !Number.isFinite(ts)) return;
+        const prev = subs[rumor.pubkey];
+        if (prev && typeof prev.ts === "number" && ts <= prev.ts) {
+          console.log(`[무시] ${short(rumor.pubkey)} 사용자의 오래된 등록 DM(ts가 진행하지 않음)`);
+          return;
+        }
+        subs[rumor.pubkey] = { sub: content.sub, ts };
         saveSubs(subs).catch((err) => console.warn("subs.json 저장 실패:", err));
         console.log(`[등록] ${short(rumor.pubkey)} 사용자가 푸시 구독을 등록/갱신함`);
         restartWatch();
@@ -186,11 +198,8 @@ async function main() {
   }
 
   async function handleWatchedEvent(event) {
-    if (archiveIndex.has(event.id)) return; // 이미 처리한 이벤트
-    archiveIndex.add(event.id);
-    const entry = { id: event.id, event, firstSeenAt: Date.now() };
-    archiveList.push(entry);
-    await appendArchive(entry);
+    if (seenEventIds.has(event.id)) return; // 이미 처리한 이벤트
+    seenEventIds.add(event.id);
 
     const targetPk = event.tags.find((t) => t[0] === "p")?.[1];
     if (!targetPk || !subs[targetPk]) return;
@@ -205,7 +214,7 @@ async function main() {
     lastPushAt.set(targetPk, Date.now());
 
     try {
-      await webpush.sendNotification(subs[targetPk], undefined);
+      await webpush.sendNotification(subs[targetPk].sub, undefined);
       console.log(`  → 푸시 발송 성공`);
     } catch (err) {
       if (err.statusCode === 404 || err.statusCode === 410) {
@@ -221,32 +230,6 @@ async function main() {
 
   restartWatch();
 
-  // §16.5: 30일 이내 암호문을 24시간마다 재발행, 지난 것은 삭제
-  async function pruneAndRepublish() {
-    const now = Date.now();
-    const kept = [];
-    let republished = 0;
-    for (const entry of archiveList) {
-      if (now - entry.firstSeenAt > ARCHIVE_MAX_AGE_MS) {
-        archiveIndex.delete(entry.id);
-        continue;
-      }
-      kept.push(entry);
-      try {
-        await Promise.any(pool.publish(RELAYS, entry.event));
-        republished++;
-      } catch {
-        // 이번 회차 재발행 실패 — 다음 24시간 주기에 다시 시도됨
-      }
-    }
-    archiveList.length = 0;
-    archiveList.push(...kept);
-    await rewriteArchive(kept);
-    console.log(`[재발행] 보관 중인 ${kept.length}건 중 ${republished}건 재발행 완료`);
-  }
-
-  setTimeout(() => pruneAndRepublish().catch((err) => console.warn("재발행 오류:", err)), 10000);
-  setInterval(() => pruneAndRepublish().catch((err) => console.warn("재발행 오류:", err)), REPUBLISH_INTERVAL_MS);
 
   console.log(`도우미가 실행 중입니다. 등록된 사용자: ${Object.keys(subs).length}명`);
 }
