@@ -776,6 +776,12 @@ function wireEvents() {
 // ---------------------------------------------------------------- 부팅
 
 async function boot() {
+  // v4 §S7(F-13): 다른 사이트가 밀담을 iframe에 넣고 클릭재킹하는 것을 막는다.
+  // meta CSP는 frame-ancestors를 지원하지 않으므로 JS로 처리한다.
+  if (window.top !== window.self) {
+    document.body.textContent = "밀담은 다른 사이트 안에서 실행할 수 없습니다.";
+    return;
+  }
   if (!supportsRequiredApis()) {
     showUnsupported();
     return;
