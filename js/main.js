@@ -5,6 +5,7 @@ import {
   getSession, saveSession, deleteSession, addMessage, hasMessageFrom, updateMessageStatusFrom,
   getMessagesByContact, getLastSync, setLastSync, hasSeenWrap, markSeenWrap,
   pruneSeenWraps, getHelper, saveHelper, getGaps, saveGaps, deleteGaps,
+  getCodePin, setCodePin,
 } from "./store.js";
 import {
   generateIdentity, encodeInviteCode, parseInviteCode, verifyInviteSignature,
@@ -449,6 +450,8 @@ async function openSettingsView() {
   const hint = document.getElementById("set-notify-hint");
   notifyBtn.disabled = !helper;
   hint.hidden = !!helper;
+  const fp = document.getElementById("set-fingerprint");
+  if (fp) fp.textContent = codeFingerprint ? codeFingerprint.slice(0, 16) : "확인할 수 없음";
   showView("view-settings");
 }
 
@@ -776,6 +779,60 @@ function wireEvents() {
   });
 }
 
+// ---------------------------------------------------------------- 코드 지문(v4 §S10)
+// 배포본이 조용히 바뀌는 것을 탐지한다. 한계는 설정 화면에 함께 표시한다
+// (불변식 #5): 코드 오리진 자체를 장악한 공격자는 이 검사도 함께 조작할 수
+// 있으므로 표적 공격에 대한 방어가 아니다.
+
+let codeFingerprint = null;
+
+async function loadCodeFingerprint() {
+  try {
+    const res = await fetch("integrity.json", { cache: "no-store" });
+    if (!res.ok) return null;
+    const manifest = await res.json();
+    return typeof manifest.fingerprint === "string" ? manifest.fingerprint : null;
+  } catch (err) {
+    console.warn("mildam: integrity.json 을 읽을 수 없습니다", err);
+    return null;
+  }
+}
+
+// 지문이 바뀌었으면 전체 화면 경고를 띄우고, 사용자가 "계속"을 누를 때까지
+// 기다린다. 누르면 새 지문을 저장하고 진행한다.
+function showCodeWarning(prev, next) {
+  return new Promise((resolve) => {
+    const box = document.getElementById("code-warning");
+    document.getElementById("code-warning-text").textContent =
+      "이 기기의 앱 코드 지문이 바뀌었습니다. 직접 업데이트한 적이 없다면 사용을 멈추고 확인하세요.";
+    document.getElementById("code-warning-prev").textContent = prev.slice(0, 16);
+    document.getElementById("code-warning-next").textContent = next.slice(0, 16);
+    box.hidden = false;
+    document.getElementById("code-warning-continue").addEventListener(
+      "click",
+      async () => {
+        await setCodePin(next);
+        box.hidden = true;
+        resolve();
+      },
+      { once: true }
+    );
+  });
+}
+
+async function checkCodePin() {
+  codeFingerprint = await loadCodeFingerprint();
+  if (!codeFingerprint) return;
+  const pinned = await getCodePin();
+  if (!pinned) {
+    await setCodePin(codeFingerprint); // TOFU: 처음 본 지문을 신뢰한다
+    return;
+  }
+  if (pinned !== codeFingerprint) {
+    await showCodeWarning(pinned, codeFingerprint);
+  }
+}
+
 // ---------------------------------------------------------------- 부팅
 
 async function boot() {
@@ -790,6 +847,7 @@ async function boot() {
     return;
   }
   await registerServiceWorker();
+  await checkCodePin();
   wireEvents();
 
   identity = await getIdentity();

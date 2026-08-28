@@ -101,6 +101,17 @@ export async function setLastSync(seconds) {
   return tx("meta", "readwrite", (s) => reqToPromise(s.put({ k: "lastSync", value: seconds })));
 }
 
+// v4 §S10: TOFU 코드 지문. 처음 본 지문을 저장해 두고, 다음 부팅에서 달라지면
+// 경고한다.
+export async function getCodePin() {
+  const row = await tx("meta", "readonly", (s) => reqToPromise(s.get("codePin")));
+  return row ? row.value : null;
+}
+
+export async function setCodePin(fingerprint) {
+  return tx("meta", "readwrite", (s) => reqToPromise(s.put({ k: "codePin", value: fingerprint })));
+}
+
 export async function getHelper() {
   return tx("meta", "readonly", (s) => reqToPromise(s.get("helper")));
 }

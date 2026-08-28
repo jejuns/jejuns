@@ -1,0 +1,17 @@
+{
+  "files": {
+    "index.html": "777b41729753fb6dacb2ca61e003e9ea9d21caa2d791ca7142049a709e74b884",
+    "css/style.css": "b0104322fcaf1d5a74ec8dfe7d08a54293832b57258059a905f87ed85a79220c",
+    "js/main.js": "b4cff3b83b660fac035442c9613939fe80025b8372e63b1c1ea3adb88267eacd",
+    "js/util.js": "e2b42d3eb0b767e6d911a05b32c24ad487f364b49d7a2af93d0ba8797b8f3262",
+    "js/pfs.js": "96da6a98230aab783cbf799ef105da5dc6042a31cee862525892aa609390e697",
+    "js/crypto.js": "9d6396bf335b5d5738f7d00cb80aab219eb7f6d715d35fa67c03144af43b3d52",
+    "js/store.js": "9c2595926d012ea293405b5b33739376aa595f0ea345bc92cfe163a6c4e56f83",
+    "js/net.js": "183aa732599a1896472753080abf1709a81c3d331395ddf77b9e77a358db545f",
+    "js/config.js": "ba6e9360c4b08cde4d8a4d63ad5445f96564dd01201f6f0e75333caa51ab590f",
+    "vendor/nostr-tools.js": "96162f66cd5b311c811126b0f068decbcbbeba6482be868e7d8fd54058633625",
+    "icons/icon.svg": "fce4284be249fae99b35e3d9f6857f4fbc18f75d5228652230b1ccf04ce7fbe5",
+    "manifest.webmanifest": "15a55ccb718c22ed3199a652be143a852496822fc898937a2549e31011c1f2fb"
+  },
+  "fingerprint": "ef84d10c1966ff6f32966d1fdfd534aa35d909ba9c15fdbdeca4368d4e0f1b27"
+}

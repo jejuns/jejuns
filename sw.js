@@ -18,9 +18,39 @@ const PRECACHE = [
   "manifest.webmanifest",
 ];
 
+// v4 §S10: 설치 시점에 integrity.json과 대조해 배포본이 조용히 바뀌지 않았는지
+// 확인한다. 하나라도 어긋나면 throw해서 설치를 중단시킨다 — 그러면 기존 서비스
+// 워커가 계속 서빙하므로, 변조된 코드가 활성화되지 않는다.
+//
+// 한계(불변식 #5): 코드를 서빙하는 서버 자체를 장악한 공격자는 integrity.json도
+// 함께 고칠 수 있으므로 이건 완전한 방어가 아니다. 표적이 아닌 변조를 탐지하는
+// 용도다.
+async function sha256Hex(buf) {
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function verifyIntegrity() {
+  const res = await fetch("integrity.json", { cache: "no-store" });
+  if (!res.ok) throw new Error("mildam sw: integrity.json 을 가져올 수 없습니다");
+  const manifest = await res.json();
+  for (const [path, expected] of Object.entries(manifest.files)) {
+    const fileRes = await fetch(path, { cache: "no-store" });
+    if (!fileRes.ok) throw new Error(`mildam sw: ${path} 을 가져올 수 없습니다`);
+    const actual = await sha256Hex(await fileRes.arrayBuffer());
+    if (actual !== expected) {
+      throw new Error(`mildam sw: 무결성 불일치 — ${path}`);
+    }
+  }
+}
+
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE))
+    (async () => {
+      await verifyIntegrity();
+      const cache = await caches.open(CACHE_NAME);
+      await cache.addAll(PRECACHE);
+    })()
   );
 });
 

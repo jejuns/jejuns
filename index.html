@@ -110,10 +110,27 @@
       <hr class="sep" />
       <button id="set-notify" class="btn btn-primary" disabled>알림 켜기</button>
       <p id="set-notify-hint" class="hint" hidden>먼저 도우미 코드를 등록하세요</p>
+      <hr class="sep" />
+      <label class="field">
+        <span>이 기기의 앱 코드 지문</span>
+        <p id="set-fingerprint" class="code-box"></p>
+      </label>
+      <p class="hint">이 지문은 배포본이 조용히 바뀌는 것을 탐지하기 위한 것입니다. 코드를 서빙하는 서버 자체를 장악한 공격자는 이 검사도 함께 조작할 수 있으므로, 완전한 방어가 아닙니다.</p>
     </div>
   </section>
 
 </main>
+
+<div id="code-warning" class="code-warning" hidden>
+  <div class="code-warning-box">
+    <h2 class="code-warning-title">코드 지문 변경 감지</h2>
+    <p id="code-warning-text" class="hint"></p>
+    <p class="hint">이전 지문 / 새 지문</p>
+    <p id="code-warning-prev" class="code-box"></p>
+    <p id="code-warning-next" class="code-box"></p>
+    <button id="code-warning-continue" class="btn">계속</button>
+  </div>
+</div>
 
 <div id="toast" class="toast" hidden></div>
 
