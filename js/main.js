@@ -25,6 +25,28 @@ const ERRORS = {
   E09: "도우미 코드 형식이 올바르지 않습니다",
 };
 
+// v4 §S1(F-06): 복호된 페이로드의 id/ref/body/ts를 신뢰하지 않고 검증한다.
+const UUID_V4_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function isUuidV4(s) {
+  return typeof s === "string" && UUID_V4_RE.test(s);
+}
+
+// 범위를 벗어난 ts는 버리지 않고 클램프한다 — 기기 시계 오차로 정상 메시지를
+// 잃는 것보다, 정렬을 공격자가 조종하지 못하게 막는 쪽이 중요하다.
+function clampTs(ts) {
+  if (!Number.isSafeInteger(ts)) return null;
+  const now = Date.now();
+  return Math.min(Math.max(ts, now - 30 * 24 * 60 * 60 * 1000), now + 5 * 60 * 1000);
+}
+
+// 양방향 제어·제로폭 문자를 U+FFFD로 치환한다. textContent를 쓰므로 XSS는
+// 아니지만, 연락처를 시각적으로 사칭하는 것을 막는다.
+function sanitizeForDisplay(s) {
+  return s.replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "\uFFFD");
+}
+
 const VIEWS = [
   "view-onboarding",
   "view-contacts",
@@ -475,6 +497,25 @@ async function handleIncomingWrap(rawEvent) {
 
   const payload = decrypted.payload;
   if (!payload || payload.v !== 3) return; // §6.5: 미지의 버전은 조용히 폐기
+
+  // v4 §S1(F-06): 복호에 성공했다고 해서 필드 내용까지 신뢰하지 않는다.
+  if (payload.kind === "text") {
+    const bodyLen = typeof payload.body === "string" ? [...payload.body].length : -1;
+    const clampedTs = clampTs(payload.ts);
+    if (!isUuidV4(payload.id) || bodyLen < 1 || bodyLen > 2000 || clampedTs === null) {
+      console.warn("mildam: text payload failed validation, discarding");
+      return;
+    }
+    payload.ts = clampedTs;
+    payload.body = sanitizeForDisplay(payload.body);
+  } else if (payload.kind === "ack") {
+    const clampedTs = clampTs(payload.ts);
+    if (!isUuidV4(payload.ref) || clampedTs === null) {
+      console.warn("mildam: ack payload failed validation, discarding");
+      return;
+    }
+    payload.ts = clampedTs;
+  }
 
   if (payload.kind === "text") {
     if (await hasMessage(payload.id)) return; // §6.5: id 중복은 조용히 폐기
