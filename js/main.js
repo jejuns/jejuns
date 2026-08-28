@@ -2,9 +2,9 @@
 
 import {
   getIdentity, saveIdentity, getAllContacts, addContact, contactExists, getContact,
-  getSession, saveSession, addMessage, hasMessageFrom, updateMessageStatusFrom,
+  getSession, saveSession, deleteSession, addMessage, hasMessageFrom, updateMessageStatusFrom,
   getMessagesByContact, getLastSync, setLastSync, hasSeenWrap, markSeenWrap,
-  pruneSeenWraps, getHelper, saveHelper,
+  pruneSeenWraps, getHelper, saveHelper, getGaps, saveGaps, deleteGaps,
 } from "./store.js";
 import {
   generateIdentity, encodeInviteCode, parseInviteCode, verifyInviteSignature,
@@ -216,6 +216,7 @@ async function openChat(contact) {
   showView("view-chat");
   updateConnectionBadges(net.getState());
   await renderChatMessages(contact.pk);
+  await updateGapWarning(contact.pk);
 }
 
 async function closeChat() {
@@ -269,16 +270,100 @@ async function resendMessageBuildLocked(msg) {
   return { wrapped };
 }
 
-// ---------------------------------------------------------------- 안전코드
+// ---------------------------------------------------------------- 안전코드 + 세션 초기화(v4 §S6-a, F-04)
+
+const SAFETY_RESET_LABEL = "이 대화 세션 초기화";
+let safetyResetArmed = false;
+let safetyResetTimer = null;
+
+// v4 P-5: 확인 대기 중 화면을 벗어나면(뒤로가기·재진입) 반드시 상태를 취소한다
+// — 방치된 확인 상태가 남아있다가 나중에 무관한 탭이 곧바로 초기화를 실행하는
+// 것을 막기 위함이다.
+function cancelSafetyResetConfirm() {
+  safetyResetArmed = false;
+  clearTimeout(safetyResetTimer);
+  safetyResetTimer = null;
+  const btn = document.getElementById("safety-reset");
+  if (btn) btn.textContent = SAFETY_RESET_LABEL;
+}
+
+async function handleSafetyReset() {
+  if (!currentChatPk) return;
+  if (!safetyResetArmed) {
+    safetyResetArmed = true;
+    document.getElementById("safety-reset").textContent = "정말 초기화하려면 5초 안에 다시 누르세요";
+    safetyResetTimer = setTimeout(cancelSafetyResetConfirm, 5000);
+    return;
+  }
+  const pk = currentChatPk;
+  cancelSafetyResetConfirm();
+  await deleteSession(pk);
+  await deleteGaps(pk);
+  toast("대화 세션을 초기화했습니다. 다음 메시지부터 새 세션으로 전송됩니다.");
+  await updateGapWarning(pk);
+}
 
 async function openSafetyView() {
   if (!currentChatPk) return;
   const contact = await getContact(currentChatPk);
   if (!contact) return;
+  cancelSafetyResetConfirm();
   document.getElementById("safety-name").textContent = contact.name;
   const hex = await computeSafetyCode(identity.pk, contact.pk);
   document.getElementById("safety-code").textContent = formatSafetyCode(hex);
   showView("view-safety");
+}
+
+// ---------------------------------------------------------------- 수신 갭 탐지(v4 §S6-b, F-14)
+// 릴레이가 메시지를 조용히 누락시켜도(삭제·비전달) 탐지할 수 있도록, 복호에
+// 성공한 모든 메시지의 래칫 헤더(h.dh/h.pn/h.n)를 관측해 빠진 번호를 추적한다.
+// 이 헤더는 AEAD AAD에 묶여 있으므로 위조 불가능하다 — 복호가 성공했다는
+// 것 자체가 헤더 값을 신뢰할 수 있다는 뜻이다.
+
+async function recordGapObservation(pk, h) {
+  let record = await getGaps(pk);
+  if (!record) record = { pk, prevChainDh: null, chains: {} };
+
+  const isNewChain = !(h.dh in record.chains);
+  if (isNewChain && record.prevChainDh !== null && record.chains[record.prevChainDh]) {
+    const prev = record.chains[record.prevChainDh];
+    for (let n = prev.maxN + 1; n < h.pn; n++) {
+      if (!prev.missing.includes(n)) prev.missing.push(n);
+    }
+    prev.maxN = Math.max(prev.maxN, h.pn - 1);
+  }
+  if (isNewChain) record.chains[h.dh] = { maxN: -1, missing: [] };
+  const c = record.chains[h.dh];
+  record.prevChainDh = h.dh;
+  if (h.n > c.maxN + 1) {
+    for (let n = c.maxN + 1; n < h.n; n++) {
+      if (!c.missing.includes(n)) c.missing.push(n);
+    }
+  }
+  const idx = c.missing.indexOf(h.n);
+  if (idx !== -1) c.missing.splice(idx, 1);
+  c.maxN = Math.max(c.maxN, h.n);
+
+  // 문자열 키의 순회 순서는 삽입 순서를 그대로 보존하므로 별도의 순서
+  // 추적 자료구조 없이 Object.keys(...)[0]이 곧 "가장 먼저 추가된 체인"이다.
+  const keys = Object.keys(record.chains);
+  if (keys.length > 8) delete record.chains[keys[0]];
+
+  await saveGaps(record);
+}
+
+async function updateGapWarning(pk) {
+  if (currentChatPk !== pk) return;
+  const banner = document.getElementById("chat-gap");
+  if (!banner) return;
+  const record = await getGaps(pk);
+  const total = record ? Object.values(record.chains).reduce((sum, c) => sum + c.missing.length, 0) : 0;
+  if (total > 0) {
+    banner.textContent = `받지 못한 메시지 ${total}건이 있습니다. 상대에게 확인해 보세요.`;
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
 }
 
 // ---------------------------------------------------------------- 온보딩
@@ -510,9 +595,12 @@ async function handleIncomingWrap(rawEvent) {
 
   // ---- 단계 2: 상대(rumor.pubkey) pk로 세션 락 안에서 수행 ----
   const locked = await withSessionLock(rumor.pubkey, () => handleIncomingWrapLocked(rawEvent, rumor, contact));
-  if (!locked) return; // 단계 2에서 조용히 폐기됨(markSeenWrap도 이미 처리됨)
+  if (!locked) return; // 복호 실패 등 확정적 폐기(markSeenWrap도 이미 처리됨, 갭 관측 없음)
 
   // ---- 단계 3: 락 없음 ----
+  // v4 §S6-b: 복호는 성공했지만(gapUpdated) 페이로드가 이후 검증에 실패해
+  // 폐기된 경우에도 갭 배너는 갱신해야 한다 — 갭 관측 자체는 이미 반영됐다.
+  if (locked.gapUpdated) await updateGapWarning(rumor.pubkey);
   if (locked.ackWrapped) {
     try {
       await net.publishWrap(locked.ackWrapped);
@@ -532,8 +620,10 @@ async function handleIncomingWrap(rawEvent) {
   }
 }
 
-// 단계 2 본문. 반환값이 null이면 확정적으로 폐기된 것이고(markSeenWrap도 이미
-// 끝났음), 단계 3은 아무 일도 하지 않는다.
+// 단계 2 본문. 반환값이 null이면 복호 자체가 실패한 확정적 폐기이고
+// (markSeenWrap도 이미 끝났음) 단계 3은 아무 일도 하지 않는다. 복호에는
+// 성공했으나 페이로드 검증에서 폐기된 경우는 { kind:null, gapUpdated:true }를
+// 반환한다 — 갭 관측은 이미 반영됐으므로 단계 3에서 배너는 갱신해야 한다.
 async function handleIncomingWrapLocked(rawEvent, rumor, contact) {
   // 락을 얻기까지 대기하는 동안 같은 이벤트가 먼저 들어와 처리됐을 수 있다.
   if (await hasSeenWrap(rawEvent.id)) return null;
@@ -549,13 +639,20 @@ async function handleIncomingWrapLocked(rawEvent, rumor, contact) {
   }
   await saveSession(rumor.pubkey, mgr);
 
+  // v4 §S6-b(F-14): 복호 성공 직후, 페이로드 내용의 유효성과 무관하게 갭을
+  // 관측한다 — 래칫 헤더(h)는 AEAD AAD에 묶여 위조 불가능하므로 복호 성공
+  // 그 자체가 헤더 값을 신뢰할 근거다. 이 시점 이후의 모든 반환에는
+  // gapUpdated:true를 실어 단계 3에서 배너를 갱신하게 한다.
+  const h = JSON.parse(rumor.content).h;
+  await recordGapObservation(rumor.pubkey, h);
+
   const lastSync = await getLastSync();
   if (rawEvent.created_at > lastSync) await setLastSync(rawEvent.created_at);
 
   const payload = decrypted.payload;
   if (!payload || payload.v !== 3) { // §6.5: 미지의 버전은 조용히 폐기
     await markSeenWrap(rawEvent.id);
-    return null;
+    return { kind: null, ackWrapped: null, gapUpdated: true };
   }
 
   // v4 §S1(F-06): 복호에 성공했다고 해서 필드 내용까지 신뢰하지 않는다.
@@ -565,7 +662,7 @@ async function handleIncomingWrapLocked(rawEvent, rumor, contact) {
     if (!isUuidV4(payload.id) || bodyLen < 1 || bodyLen > 2000 || clampedTs === null) {
       console.warn("mildam: text payload failed validation, discarding");
       await markSeenWrap(rawEvent.id);
-      return null;
+      return { kind: null, ackWrapped: null, gapUpdated: true };
     }
     payload.ts = clampedTs;
     payload.body = sanitizeForDisplay(payload.body);
@@ -591,7 +688,7 @@ async function handleIncomingWrapLocked(rawEvent, rumor, contact) {
       console.warn("mildam: failed to build ack", err);
     }
     await markSeenWrap(rawEvent.id);
-    return { kind: "text", ackWrapped, wasDuplicate };
+    return { kind: "text", ackWrapped, wasDuplicate, gapUpdated: true };
   }
 
   if (payload.kind === "ack") {
@@ -599,18 +696,18 @@ async function handleIncomingWrapLocked(rawEvent, rumor, contact) {
     if (!isUuidV4(payload.ref) || clampedTs === null) {
       console.warn("mildam: ack payload failed validation, discarding");
       await markSeenWrap(rawEvent.id);
-      return null;
+      return { kind: null, ackWrapped: null, gapUpdated: true };
     }
     // v4 §S2(F-05): 이 상대(rumor.pubkey)와의 대화에서 내가 보낸(out) 메시지만
     // delivered로 바꿀 수 있다 — 다른 대화의 메시지 id로는 조회조차 안 된다.
     await updateMessageStatusFrom(rumor.pubkey, payload.ref, "delivered", "out");
     await markSeenWrap(rawEvent.id);
-    return { kind: "ack", ackWrapped: null };
+    return { kind: "ack", ackWrapped: null, gapUpdated: true };
   }
 
   // §6.5: 그 외 kind는 조용히 폐기
   await markSeenWrap(rawEvent.id);
-  return null;
+  return { kind: null, ackWrapped: null, gapUpdated: true };
 }
 
 async function startMessaging() {
@@ -655,7 +752,11 @@ function wireEvents() {
     openSafetyView();
   });
   document.getElementById("safety-back").addEventListener("click", () => {
+    cancelSafetyResetConfirm();
     showView("view-chat");
+  });
+  document.getElementById("safety-reset").addEventListener("click", () => {
+    handleSafetyReset();
   });
 
   document.getElementById("nav-settings").addEventListener("click", () => {

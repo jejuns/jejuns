@@ -141,6 +141,12 @@ export async function saveSession(pk, mgr) {
   return tx("sessions", "readwrite", (s) => reqToPromise(s.put({ pk, mgr })));
 }
 
+// v4 §S6-a(F-04): 래칫이 영구히 어긋났을 때 사용자가 직접 세션을 지우고
+// 새로 시작할 수 있게 한다.
+export async function deleteSession(pk) {
+  return tx("sessions", "readwrite", (s) => reqToPromise(s.delete(pk)));
+}
+
 // ---------------------------------------------------------------- messages
 
 export async function addMessage(msg) {
@@ -202,4 +208,19 @@ export async function pruneSeenWraps(maxAgeMs = SEEN_WRAP_MAX_AGE_MS) {
       cursorReq.onerror = () => reject(cursorReq.error);
     });
   });
+}
+
+// ---------------------------------------------------------------- gaps
+// v4 §S6-b(F-14): 상대 pk별 래칫 카운터 관측 기록. { pk, prevChainDh, chains }.
+
+export async function getGaps(pk) {
+  return tx("gaps", "readonly", (s) => reqToPromise(s.get(pk)));
+}
+
+export async function saveGaps(record) {
+  return tx("gaps", "readwrite", (s) => reqToPromise(s.put(record)));
+}
+
+export async function deleteGaps(pk) {
+  return tx("gaps", "readwrite", (s) => reqToPromise(s.delete(pk)));
 }

@@ -71,6 +71,7 @@
       </div>
       <button id="chat-safety" class="icon-btn" title="안전코드" aria-label="안전코드">🔑</button>
     </header>
+    <p id="chat-gap" class="gap-warning" hidden></p>
     <div id="chat-messages" class="messages"></div>
     <form id="chat-form" class="composer">
       <textarea id="chat-input" rows="1" maxlength="2000" placeholder="메시지 입력" autocomplete="off"></textarea>
@@ -87,6 +88,9 @@
       <p id="safety-name" class="hint"></p>
       <p id="safety-code" class="safety-code"></p>
       <p class="hint">두 사람의 화면에 같은 코드가 표시되면 대화 상대가 바꿔치기되지 않았다는 뜻입니다. 직접 만나거나 영상통화로 확인하세요.</p>
+      <hr class="sep" />
+      <p class="hint">이 대화의 암호 세션을 새로 시작합니다. 초기화 이후에는 상대가 이전에 보낸 메시지를 더 이상 복호할 수 없습니다. 대화가 복구 불가능하게 멈췄을 때만 사용하세요.</p>
+      <button id="safety-reset" class="btn btn-danger">이 대화 세션 초기화</button>
     </div>
   </section>
 
